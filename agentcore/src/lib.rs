@@ -1,14 +1,20 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+mod agent;
+mod error;
+mod events;
+mod provider;
+mod tool;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub use agent::{Agent, AgentBuilder, AgentConfig, AgentInput, AgentResult, RunOutput};
+pub use error::{AgentError, LlmError, ToolCallError};
+pub use events::EventSink;
+pub use provider::{CompletionRequest, CompletionResponse, LlmProvider, StopReason, ToolChoice};
+pub use tool::{ToolSpec, Toolbox};
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use models::agent::{
+    ContentPart, Message, Role, TextPart, ThinkingPart, ToolCallPart, ToolResultPart, Usage,
+};
+pub use models::events::{
+    AgentEvent, MessageCompleteEvent, MessageStartEvent, RunCompleteEvent, TextChunkEvent,
+    ThinkingEvent, ToolCallInputDeltaEvent, ToolCallInputDoneEvent, ToolCallStartEvent,
+    ToolCompleteEvent, ToolExecutingEvent,
+};

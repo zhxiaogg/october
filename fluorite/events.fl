@@ -1,0 +1,32 @@
+/// Agent event types
+package events;
+
+use agent.Message;
+use agent.Usage;
+use agent.Role;
+
+struct MessageStartEvent    { id: String, role: Role }
+struct MessageCompleteEvent { id: String, message: Message }
+struct TextChunkEvent       { text: String }
+struct ThinkingEvent        { text: String }
+struct ToolCallStartEvent   { id: String, name: String }
+struct ToolCallInputDeltaEvent { id: String, delta: String }
+struct ToolCallInputDoneEvent  { id: String }
+struct ToolExecutingEvent   { id: String }
+struct ToolCompleteEvent    { id: String, output: String, is_error: bool }
+struct RunCompleteEvent     { usage: Usage, iterations: u32 }
+
+/// Events emitted during agent execution for UX, streaming, and history.
+#[type_tag = "type"]
+union AgentEvent {
+    MessageStart(MessageStartEvent),
+    MessageComplete(MessageCompleteEvent),
+    TextChunk(TextChunkEvent),
+    Thinking(ThinkingEvent),
+    ToolCallStart(ToolCallStartEvent),
+    ToolCallInputDelta(ToolCallInputDeltaEvent),
+    ToolCallInputDone(ToolCallInputDoneEvent),
+    ToolExecuting(ToolExecutingEvent),
+    ToolComplete(ToolCompleteEvent),
+    RunComplete(RunCompleteEvent),
+}
