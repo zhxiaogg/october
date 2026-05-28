@@ -7,6 +7,7 @@ members = [
     "models",
     "providers/anthropic",
     "providers/mock-llm",
+    "tests",
 ]
 resolver = "2"
 
