@@ -43,6 +43,7 @@ union ContentPart {
 
 /// A single message in the conversation
 struct Message {
+    id: String,
     role: Role,
     parts: Vec<ContentPart>,
 }
@@ -51,4 +52,24 @@ struct Message {
 struct Usage {
     input_tokens: u32,
     output_tokens: u32,
+}
+
+/// New user message — starts a new turn
+struct UserMessageInput {
+    id: String,
+    text: String,
+}
+
+/// Tool result input — resumes the agent after a handoff
+struct ToolResultInput {
+    tool_call_id: String,
+    output: String,
+    is_error: bool,
+}
+
+/// The only valid inputs to Agent::run
+#[type_tag = "type"]
+union AgentInput {
+    UserMessage(UserMessageInput),
+    ToolResult(ToolResultInput),
 }

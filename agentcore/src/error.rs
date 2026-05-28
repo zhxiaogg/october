@@ -1,6 +1,12 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
+pub enum AgentBuildError {
+    #[error("nudge_threshold ({nudge}) must be less than stuck_threshold ({stuck})")]
+    InvalidConfig { nudge: usize, stuck: usize },
+}
+
+#[derive(Debug, Error)]
 pub enum AgentError {
     #[error("max iterations exceeded (max={max})")]
     MaxIterationsExceeded { max: u32 },
@@ -10,9 +16,6 @@ pub enum AgentError {
 
     #[error("provider error: {0}")]
     Provider(#[from] LlmError),
-
-    #[error("tool '{name}' failed: {source}")]
-    Tool { name: String, source: ToolCallError },
 
     #[error("cancelled")]
     Cancelled,

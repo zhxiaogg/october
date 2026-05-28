@@ -75,7 +75,8 @@ impl LlmProvider for MockProvider {
 
     async fn complete(
         &self,
-        _request: CompletionRequest,
+        _request: CompletionRequest<'_>,
+        _message_id: &str,
         _events: &dyn EventSink,
     ) -> Result<CompletionResponse, LlmError> {
         let mut idx = self.call_index.lock().unwrap();
@@ -143,7 +144,7 @@ impl CollectingEventSink {
         self.events()
             .into_iter()
             .filter_map(|e| match e {
-                AgentEvent::MessageComplete(mc) => Some(mc.id),
+                AgentEvent::MessageComplete(mc) => Some(mc.message_id),
                 _ => None,
             })
             .collect()

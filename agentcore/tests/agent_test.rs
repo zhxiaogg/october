@@ -17,12 +17,13 @@ use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
 async fn test_simple_text_completion() {
-    let agent = Agent::builder(MockProvider::text("Hello, world!")).build();
+    let mut agent = Agent::builder(MockProvider::text("Hello, world!"))
+        .build()
+        .unwrap();
     let sink = CollectingEventSink::new();
     let output = agent
         .run(
-            vec![],
-            AgentInput::UserMessage("hi".into()),
+            AgentInput::user_message("msg-1", "hi"),
             &sink,
             CancellationToken::new(),
         )
@@ -41,12 +42,11 @@ async fn test_simple_text_completion() {
 
 #[tokio::test]
 async fn test_completion_emits_message_complete_events() {
-    let agent = Agent::builder(MockProvider::text("done")).build();
+    let mut agent = Agent::builder(MockProvider::text("done")).build().unwrap();
     let sink = CollectingEventSink::new();
     agent
         .run(
-            vec![],
-            AgentInput::UserMessage("go".into()),
+            AgentInput::user_message("msg-1", "go"),
             &sink,
             CancellationToken::new(),
         )
@@ -55,45 +55,67 @@ async fn test_completion_emits_message_complete_events() {
 
     let ids = sink.message_complete_ids();
     assert!(
-        ids.len() >= 2,
-        "expected at least 2 MessageComplete events, got {}",
-        ids.len()
+        !ids.is_empty(),
+        "expected at least 1 MessageComplete event, got 0"
     );
 }
 
 #[tokio::test]
-async fn test_run_complete_event_emitted() {
-    let agent = Agent::builder(MockProvider::text("ok")).build();
+async fn test_input_message_event_emitted() {
+    let mut agent = Agent::builder(MockProvider::text("ok")).build().unwrap();
     let sink = CollectingEventSink::new();
     agent
         .run(
-            vec![],
-            AgentInput::UserMessage("x".into()),
+            AgentInput::user_message("msg-1", "x"),
             &sink,
             CancellationToken::new(),
         )
         .await
         .unwrap();
 
-    let run_complete_count = sink
+    let input_event = sink.events().into_iter().find_map(|e| match e {
+        AgentEvent::InputMessage(ie) => Some(ie),
+        _ => None,
+    });
+    let ie = input_event.unwrap();
+    assert_eq!(ie.message_id, "msg-1");
+    assert!(matches!(ie.input, AgentInput::UserMessage(_)));
+}
+
+#[tokio::test]
+async fn test_run_complete_event_emitted() {
+    let mut agent = Agent::builder(MockProvider::text("ok")).build().unwrap();
+    let sink = CollectingEventSink::new();
+    agent
+        .run(
+            AgentInput::user_message("msg-1", "x"),
+            &sink,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+    let count = sink
         .events()
         .iter()
         .filter(|e| matches!(e, AgentEvent::RunComplete(_)))
         .count();
-    assert_eq!(run_complete_count, 1);
+    assert_eq!(count, 1);
 }
 
 #[tokio::test]
 async fn test_tool_call_cycle() {
     let provider = MockProvider::tool_then_text("tc1", "search", json!({"q": "rust"}), "found it");
     let toolbox = MockToolbox::echo("search");
-    let agent = Agent::builder(provider).with_toolbox(toolbox).build();
+    let mut agent = Agent::builder(provider)
+        .with_toolbox(toolbox)
+        .build()
+        .unwrap();
     let sink = CollectingEventSink::new();
 
     let output = agent
         .run(
-            vec![],
-            AgentInput::UserMessage("search rust".into()),
+            AgentInput::user_message("msg-1", "search rust"),
             &sink,
             CancellationToken::new(),
         )
@@ -122,22 +144,33 @@ async fn test_tool_call_cycle() {
 }
 
 #[tokio::test]
-async fn test_tool_result_added_to_history() {
+async fn test_tool_result_message_id_is_derived_from_tool_call_id() {
     let provider = MockProvider::tool_then_text("tc1", "calc", json!({"x": 1}), "result: 1");
     let toolbox = MockToolbox::echo("calc");
-    let agent = Agent::builder(provider).with_toolbox(toolbox).build();
+    let mut agent = Agent::builder(provider)
+        .with_toolbox(toolbox)
+        .build()
+        .unwrap();
     let sink = CollectingEventSink::new();
 
-    let output = agent
+    agent
         .run(
-            vec![],
-            AgentInput::UserMessage("calc".into()),
+            AgentInput::user_message("msg-1", "calc"),
             &sink,
             CancellationToken::new(),
         )
         .await
         .unwrap();
-    assert!(matches!(output.result, AgentResult::Completed { .. }));
+
+    let tc = sink
+        .events()
+        .into_iter()
+        .find_map(|e| match e {
+            AgentEvent::ToolComplete(tc) => Some(tc),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(tc.message_id, format!("result:{}", tc.tool_call_id));
 }
 
 #[tokio::test]
@@ -154,15 +187,15 @@ async fn test_handoff_tool_returns_handoff_result() {
             output_tokens: 5,
         },
     }]);
-    let agent = Agent::builder(provider)
+    let mut agent = Agent::builder(provider)
         .with_handoff_tool("handoff")
-        .build();
+        .build()
+        .unwrap();
     let sink = CollectingEventSink::new();
 
     let output = agent
         .run(
-            vec![],
-            AgentInput::UserMessage("go".into()),
+            AgentInput::user_message("msg-1", "go"),
             &sink,
             CancellationToken::new(),
         )
@@ -182,12 +215,14 @@ async fn test_handoff_tool_returns_handoff_result() {
 async fn test_resume_with_tool_result() {
     let history = vec![
         Message {
+            id: "m0".into(),
             role: Role::User,
             parts: vec![ContentPart::Text(TextPart {
                 text: "question".into(),
             })],
         },
         Message {
+            id: "m1".into(),
             role: Role::Assistant,
             parts: vec![ContentPart::ToolCall(ToolCallPart {
                 id: "hc1".into(),
@@ -197,17 +232,15 @@ async fn test_resume_with_tool_result() {
         },
     ];
     let provider = MockProvider::text("thanks for the answer");
-    let agent = Agent::builder(provider).build();
+    let mut agent = Agent::builder(provider)
+        .with_history(history)
+        .build()
+        .unwrap();
     let sink = CollectingEventSink::new();
 
     let output = agent
         .run(
-            history,
-            AgentInput::ToolResult {
-                tool_call_id: "hc1".into(),
-                output: "42".into(),
-                is_error: false,
-            },
+            AgentInput::tool_result("hc1", "42", false),
             &sink,
             CancellationToken::new(),
         )
@@ -215,6 +248,17 @@ async fn test_resume_with_tool_result() {
         .unwrap();
 
     assert!(matches!(output.result, AgentResult::Completed { .. }));
+
+    let ie = sink
+        .events()
+        .into_iter()
+        .find_map(|e| match e {
+            AgentEvent::InputMessage(ie) => Some(ie),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(ie.message_id, "result:hc1");
+    assert!(matches!(ie.input, AgentInput::ToolResult(_)));
 }
 
 #[tokio::test]
@@ -238,16 +282,16 @@ async fn test_max_iterations_exceeded() {
         nudge_threshold: 8,
         max_tokens: None,
     };
-    let agent = Agent::builder(provider)
+    let mut agent = Agent::builder(provider)
         .with_toolbox(toolbox)
         .with_config(config)
-        .build();
+        .build()
+        .unwrap();
     let sink = CollectingEventSink::new();
 
     let err = agent
         .run(
-            vec![],
-            AgentInput::UserMessage("go".into()),
+            AgentInput::user_message("msg-1", "go"),
             &sink,
             CancellationToken::new(),
         )
@@ -277,16 +321,16 @@ async fn test_stuck_detection() {
         nudge_threshold: 2,
         max_tokens: None,
     };
-    let agent = Agent::builder(provider)
+    let mut agent = Agent::builder(provider)
         .with_toolbox(toolbox)
         .with_config(config)
-        .build();
+        .build()
+        .unwrap();
     let sink = CollectingEventSink::new();
 
     let err = agent
         .run(
-            vec![],
-            AgentInput::UserMessage("go".into()),
+            AgentInput::user_message("msg-1", "go"),
             &sink,
             CancellationToken::new(),
         )
@@ -310,13 +354,16 @@ async fn test_cancellation() {
         },
     }]);
     let toolbox = MockToolbox::echo("some_tool");
-    let agent = Agent::builder(provider).with_toolbox(toolbox).build();
+    let mut agent = Agent::builder(provider)
+        .with_toolbox(toolbox)
+        .build()
+        .unwrap();
     let sink = CollectingEventSink::new();
     let token = CancellationToken::new();
     token.cancel();
 
     let err = agent
-        .run(vec![], AgentInput::UserMessage("go".into()), &sink, token)
+        .run(AgentInput::user_message("msg-1", "go"), &sink, token)
         .await
         .unwrap_err();
     assert!(matches!(err, AgentError::Cancelled));

@@ -1,13 +1,13 @@
 use crate::{
-    error::AgentError,
+    error::{AgentBuildError, AgentError},
     events::EventSink,
     provider::{CompletionRequest, LlmProvider, ToolChoice},
     tool::Toolbox,
 };
-use models::agent::{ContentPart, Message, Role, TextPart, ToolResultPart, Usage};
+use models::agent::{AgentInput, ContentPart, Message, Role, ToolResultPart, Usage};
 use models::events::{
-    AgentEvent, MessageCompleteEvent, MessageStartEvent, RunCompleteEvent, ToolCompleteEvent,
-    ToolExecutingEvent,
+    AgentEvent, InputMessageEvent, MessageCompleteEvent, MessageStartEvent, MessageStopEvent,
+    RunCompleteEvent, ToolCompleteEvent, ToolExecutingEvent,
 };
 use serde_json::Value;
 use std::collections::VecDeque;
@@ -40,38 +40,7 @@ pub struct Agent {
     pub(crate) toolbox: Option<Arc<dyn Toolbox>>,
     pub(crate) handoff_tool: Option<String>,
     pub(crate) config: AgentConfig,
-}
-
-pub enum AgentInput {
-    UserMessage(String),
-    ToolResult {
-        tool_call_id: String,
-        output: String,
-        is_error: bool,
-    },
-}
-
-impl AgentInput {
-    pub(crate) fn into_message(self) -> Message {
-        match self {
-            AgentInput::UserMessage(text) => Message {
-                role: Role::User,
-                parts: vec![ContentPart::Text(TextPart { text })],
-            },
-            AgentInput::ToolResult {
-                tool_call_id,
-                output,
-                is_error,
-            } => Message {
-                role: Role::Tool,
-                parts: vec![ContentPart::ToolResult(ToolResultPart {
-                    tool_call_id,
-                    output,
-                    is_error,
-                })],
-            },
-        }
-    }
+    pub(crate) history: Vec<Message>,
 }
 
 #[derive(Debug)]
@@ -92,6 +61,7 @@ pub struct AgentBuilder {
     toolbox: Option<Arc<dyn Toolbox>>,
     handoff_tool: Option<String>,
     config: AgentConfig,
+    history: Vec<Message>,
 }
 
 impl AgentBuilder {
@@ -102,32 +72,50 @@ impl AgentBuilder {
             toolbox: None,
             handoff_tool: None,
             config: AgentConfig::default(),
+            history: Vec::new(),
         }
     }
+
     pub fn with_system_prompt(mut self, p: impl Into<String>) -> Self {
         self.system_prompt = p.into();
         self
     }
+
     pub fn with_toolbox(mut self, t: Arc<dyn Toolbox>) -> Self {
         self.toolbox = Some(t);
         self
     }
+
     pub fn with_handoff_tool(mut self, n: impl Into<String>) -> Self {
         self.handoff_tool = Some(n.into());
         self
     }
+
     pub fn with_config(mut self, c: AgentConfig) -> Self {
         self.config = c;
         self
     }
-    pub fn build(self) -> Agent {
-        Agent {
+
+    pub fn with_history(mut self, h: Vec<Message>) -> Self {
+        self.history = h;
+        self
+    }
+
+    pub fn build(self) -> Result<Agent, AgentBuildError> {
+        if self.config.nudge_threshold >= self.config.stuck_threshold {
+            return Err(AgentBuildError::InvalidConfig {
+                nudge: self.config.nudge_threshold,
+                stuck: self.config.stuck_threshold,
+            });
+        }
+        Ok(Agent {
             provider: self.provider,
             system_prompt: self.system_prompt,
             toolbox: self.toolbox,
             handoff_tool: self.handoff_tool,
             config: self.config,
-        }
+            history: self.history,
+        })
     }
 }
 
@@ -157,21 +145,9 @@ fn extract_text(parts: &[ContentPart]) -> String {
 fn tool_fingerprint(tool_calls: &[(String, String, Value)]) -> String {
     tool_calls
         .iter()
-        .map(|(_, name, input)| format!("{}:{}", name, input))
+        .map(|(_, name, input)| format!("{name}:{input}"))
         .collect::<Vec<_>>()
         .join("|")
-}
-
-fn emit_message(events: &dyn EventSink, message: Message) {
-    let id = Uuid::new_v4().to_string();
-    events.emit(AgentEvent::MessageStart(MessageStartEvent {
-        id: id.clone(),
-        role: message.role.clone(),
-    }));
-    events.emit(AgentEvent::MessageComplete(MessageCompleteEvent {
-        id,
-        message,
-    }));
 }
 
 impl Agent {
@@ -180,15 +156,19 @@ impl Agent {
     }
 
     pub async fn run(
-        &self,
-        mut history: Vec<Message>,
+        &mut self,
         input: AgentInput,
         events: &dyn EventSink,
         cancel: CancellationToken,
     ) -> Result<RunOutput, AgentError> {
-        let input_msg = input.into_message();
-        emit_message(events, input_msg.clone());
-        history.push(input_msg);
+        let run_id = Uuid::new_v4().to_string();
+
+        let input_msg = input.to_message();
+        events.emit(AgentEvent::InputMessage(InputMessageEvent {
+            message_id: input.message_id(),
+            input,
+        }));
+        self.history.push(input_msg);
 
         let mut total_usage = Usage {
             input_tokens: 0,
@@ -211,7 +191,7 @@ impl Agent {
 
             let tools = self.toolbox.as_ref().map(|t| t.specs()).unwrap_or_default();
             let request = CompletionRequest {
-                messages: history.clone(),
+                messages: &self.history,
                 system: if self.system_prompt.is_empty() {
                     None
                 } else {
@@ -222,26 +202,41 @@ impl Agent {
                 max_tokens: self.config.max_tokens,
             };
 
+            let msg_id = Uuid::new_v4().to_string();
+            events.emit(AgentEvent::MessageStart(MessageStartEvent {
+                message_id: msg_id.clone(),
+                role: Role::Assistant,
+            }));
+
             let response = self
                 .provider
-                .complete(request, events)
+                .complete(request, &msg_id, events)
                 .await
                 .map_err(AgentError::Provider)?;
+
+            events.emit(AgentEvent::MessageStop(MessageStopEvent {
+                message_id: msg_id.clone(),
+            }));
 
             total_usage.input_tokens += response.usage.input_tokens;
             total_usage.output_tokens += response.usage.output_tokens;
 
             let assistant_msg = Message {
+                id: msg_id.clone(),
                 role: Role::Assistant,
                 parts: response.parts.clone(),
             };
-            emit_message(events, assistant_msg.clone());
-            history.push(assistant_msg);
+            events.emit(AgentEvent::MessageComplete(MessageCompleteEvent {
+                message_id: msg_id,
+                message: assistant_msg.clone(),
+            }));
+            self.history.push(assistant_msg);
 
             let tool_calls = extract_tool_calls(&response.parts);
 
             if tool_calls.is_empty() {
                 events.emit(AgentEvent::RunComplete(RunCompleteEvent {
+                    message_id: run_id.clone(),
                     usage: total_usage.clone(),
                     iterations: iteration,
                 }));
@@ -257,6 +252,7 @@ impl Agent {
                 && let Some((_, name, data)) = tool_calls.iter().find(|(_, n, _)| n == handoff_name)
             {
                 events.emit(AgentEvent::RunComplete(RunCompleteEvent {
+                    message_id: run_id.clone(),
                     usage: total_usage.clone(),
                     iterations: iteration,
                 }));
@@ -288,15 +284,17 @@ impl Agent {
                 && recent_fingerprints.iter().all(|f| f == &fingerprint);
 
             if should_nudge {
-                for (id, _, _) in &tool_calls {
-                    history.push(Message {
+                for (tool_call_id, _, _) in &tool_calls {
+                    let nudge_msg = Message {
+                        id: format!("nudge:{tool_call_id}"),
                         role: Role::Tool,
                         parts: vec![ContentPart::ToolResult(ToolResultPart {
-                            tool_call_id: id.clone(),
+                            tool_call_id: tool_call_id.clone(),
                             output: "You have called this tool with identical arguments multiple times. Please try a different approach.".to_string(),
                             is_error: false,
                         })],
-                    });
+                    };
+                    self.history.push(nudge_msg);
                 }
                 continue;
             }
@@ -305,14 +303,17 @@ impl Agent {
                 return Err(AgentError::Cancelled);
             }
 
-            for (id, name, input) in &tool_calls {
+            for (tool_call_id, name, input) in &tool_calls {
+                let result_msg_id = format!("result:{tool_call_id}");
+
                 events.emit(AgentEvent::ToolExecuting(ToolExecutingEvent {
-                    id: id.clone(),
+                    message_id: result_msg_id.clone(),
+                    tool_call_id: tool_call_id.clone(),
                 }));
 
                 let (output, is_error) = match &self.toolbox {
                     None => (
-                        format!("no toolbox available to execute tool '{}'", name),
+                        format!("no toolbox available to execute tool '{name}'"),
                         true,
                     ),
                     Some(toolbox) => match toolbox.execute(name, input.clone()).await {
@@ -322,15 +323,17 @@ impl Agent {
                 };
 
                 events.emit(AgentEvent::ToolComplete(ToolCompleteEvent {
-                    id: id.clone(),
+                    message_id: result_msg_id.clone(),
+                    tool_call_id: tool_call_id.clone(),
                     output: output.clone(),
                     is_error,
                 }));
 
-                history.push(Message {
+                self.history.push(Message {
+                    id: result_msg_id,
                     role: Role::Tool,
                     parts: vec![ContentPart::ToolResult(ToolResultPart {
-                        tool_call_id: id.clone(),
+                        tool_call_id: tool_call_id.clone(),
                         output,
                         is_error,
                     })],

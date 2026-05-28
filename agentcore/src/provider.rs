@@ -2,9 +2,8 @@ use crate::{error::LlmError, events::EventSink, tool::ToolSpec};
 use async_trait::async_trait;
 use models::agent::{ContentPart, Message, Usage};
 
-#[derive(Debug, Clone)]
-pub struct CompletionRequest {
-    pub messages: Vec<Message>,
+pub struct CompletionRequest<'a> {
+    pub messages: &'a [Message],
     pub system: Option<String>,
     pub tools: Vec<ToolSpec>,
     pub tool_choice: ToolChoice,
@@ -35,9 +34,13 @@ pub enum ToolChoice {
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
     fn model_id(&self) -> &str;
+
+    /// Perform a completion. `message_id` is the agent-assigned ID for the assistant
+    /// message being generated; providers should tag any streaming events they emit with it.
     async fn complete(
         &self,
-        request: CompletionRequest,
+        request: CompletionRequest<'_>,
+        message_id: &str,
         events: &dyn EventSink,
     ) -> Result<CompletionResponse, LlmError>;
 }
