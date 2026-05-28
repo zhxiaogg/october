@@ -4,7 +4,10 @@ use crate::{
     provider::{CompletionRequest, LlmProvider, ToolChoice},
     tool::Toolbox,
 };
-use models::agent::{AgentInput, ContentPart, Message, Role, ToolResultPart, Usage};
+use models::agent::{
+    AgentInput, AgentOutput, AgentResult, CompletedOutput, ContentPart, HandoffOutput, Message,
+    Role, ToolResultPart, Usage,
+};
 use models::events::{
     AgentEvent, InputMessageEvent, MessageCompleteEvent, MessageStartEvent, MessageStopEvent,
     RunCompleteEvent, ToolCompleteEvent, ToolExecutingEvent,
@@ -41,18 +44,6 @@ pub struct Agent {
     pub(crate) handoff_tool: Option<String>,
     pub(crate) config: AgentConfig,
     pub(crate) history: Vec<Message>,
-}
-
-#[derive(Debug)]
-pub struct RunOutput {
-    pub result: AgentResult,
-    pub usage: Usage,
-}
-
-#[derive(Debug)]
-pub enum AgentResult {
-    Completed { text: String },
-    Handoff { tool_name: String, data: Value },
 }
 
 pub struct AgentBuilder {
@@ -155,7 +146,7 @@ impl Agent {
         input: AgentInput,
         events: &dyn EventSink,
         cancel: CancellationToken,
-    ) -> Result<RunOutput, AgentError> {
+    ) -> Result<AgentOutput, AgentError> {
         let run_id = Uuid::new_v4().to_string();
 
         let input_msg = input.to_message();
@@ -235,10 +226,10 @@ impl Agent {
                     usage: total_usage.clone(),
                     iterations: iteration,
                 }));
-                return Ok(RunOutput {
-                    result: AgentResult::Completed {
+                return Ok(AgentOutput {
+                    result: AgentResult::Completed(CompletedOutput {
                         text: extract_text(&response.parts),
-                    },
+                    }),
                     usage: total_usage,
                 });
             }
@@ -251,11 +242,11 @@ impl Agent {
                     usage: total_usage.clone(),
                     iterations: iteration,
                 }));
-                return Ok(RunOutput {
-                    result: AgentResult::Handoff {
+                return Ok(AgentOutput {
+                    result: AgentResult::Handoff(HandoffOutput {
                         tool_name: name.clone(),
                         data: data.clone(),
-                    },
+                    }),
                     usage: total_usage,
                 });
             }
@@ -511,7 +502,7 @@ mod tests {
             .unwrap();
 
         match output.result {
-            AgentResult::Completed { text } => assert_eq!(text, "Hello, world!"),
+            AgentResult::Completed(CompletedOutput { text }) => assert_eq!(text, "Hello, world!"),
             other => panic!(
                 "expected Completed, got {:?}",
                 std::mem::discriminant(&other)
@@ -609,7 +600,7 @@ mod tests {
             .unwrap();
 
         match output.result {
-            AgentResult::Completed { text } => assert_eq!(text, "found it"),
+            AgentResult::Completed(CompletedOutput { text }) => assert_eq!(text, "found it"),
             other => panic!(
                 "expected Completed, got {:?}",
                 std::mem::discriminant(&other)
@@ -685,7 +676,7 @@ mod tests {
             .unwrap();
 
         match output.result {
-            AgentResult::Handoff { tool_name, data } => {
+            AgentResult::Handoff(HandoffOutput { tool_name, data }) => {
                 assert_eq!(tool_name, "handoff");
                 assert_eq!(data["answer"], 42);
             }
@@ -729,7 +720,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(matches!(output.result, AgentResult::Completed { .. }));
+        assert!(matches!(output.result, AgentResult::Completed(_)));
 
         let ie = sink
             .events()

@@ -73,3 +73,27 @@ union AgentInput {
     UserMessage(UserMessageInput),
     ToolResult(ToolResultInput),
 }
+
+/// Agent completed with a final text response
+struct CompletedOutput {
+    text: String,
+}
+
+/// Agent handed off control with structured data
+struct HandoffOutput {
+    tool_name: String,
+    data: Any,
+}
+
+/// The outcome of an agent run
+#[type_tag = "type"]
+union AgentResult {
+    Completed(CompletedOutput),
+    Handoff(HandoffOutput),
+}
+
+/// The full output of Agent::run
+struct AgentOutput {
+    result: AgentResult,
+    usage: Usage,
+}
