@@ -37,7 +37,7 @@ impl Default for AgentConfig {
 pub struct Agent {
     pub(crate) provider: Arc<dyn LlmProvider>,
     pub(crate) system_prompt: String,
-    pub(crate) toolbox: Option<Arc<dyn Toolbox>>,
+    pub(crate) toolbox: Arc<dyn Toolbox>,
     pub(crate) handoff_tool: Option<String>,
     pub(crate) config: AgentConfig,
     pub(crate) history: Vec<Message>,
@@ -58,18 +58,18 @@ pub enum AgentResult {
 pub struct AgentBuilder {
     provider: Arc<dyn LlmProvider>,
     system_prompt: String,
-    toolbox: Option<Arc<dyn Toolbox>>,
+    toolbox: Arc<dyn Toolbox>,
     handoff_tool: Option<String>,
     config: AgentConfig,
     history: Vec<Message>,
 }
 
 impl AgentBuilder {
-    pub fn new(provider: Arc<dyn LlmProvider>) -> Self {
+    pub fn new(provider: Arc<dyn LlmProvider>, toolbox: Arc<dyn Toolbox>) -> Self {
         Self {
             provider,
             system_prompt: String::new(),
-            toolbox: None,
+            toolbox,
             handoff_tool: None,
             config: AgentConfig::default(),
             history: Vec::new(),
@@ -78,11 +78,6 @@ impl AgentBuilder {
 
     pub fn with_system_prompt(mut self, p: impl Into<String>) -> Self {
         self.system_prompt = p.into();
-        self
-    }
-
-    pub fn with_toolbox(mut self, t: Arc<dyn Toolbox>) -> Self {
-        self.toolbox = Some(t);
         self
     }
 
@@ -151,8 +146,8 @@ fn tool_fingerprint(tool_calls: &[(String, String, Value)]) -> String {
 }
 
 impl Agent {
-    pub fn builder(provider: Arc<dyn LlmProvider>) -> AgentBuilder {
-        AgentBuilder::new(provider)
+    pub fn builder(provider: Arc<dyn LlmProvider>, toolbox: Arc<dyn Toolbox>) -> AgentBuilder {
+        AgentBuilder::new(provider, toolbox)
     }
 
     pub async fn run(
@@ -189,7 +184,7 @@ impl Agent {
             }
             iteration += 1;
 
-            let tools = self.toolbox.as_ref().map(|t| t.specs()).unwrap_or_default();
+            let tools = self.toolbox.specs();
             let request = CompletionRequest {
                 messages: &self.history,
                 system: if self.system_prompt.is_empty() {
@@ -311,15 +306,9 @@ impl Agent {
                     tool_call_id: tool_call_id.clone(),
                 }));
 
-                let (output, is_error) = match &self.toolbox {
-                    None => (
-                        format!("no toolbox available to execute tool '{name}'"),
-                        true,
-                    ),
-                    Some(toolbox) => match toolbox.execute(name, input.clone()).await {
-                        Ok(v) => (v.to_string(), false),
-                        Err(e) => (e.to_string(), true),
-                    },
+                let (output, is_error) = match self.toolbox.execute(name, input.clone()).await {
+                    Ok(v) => (v.to_string(), false),
+                    Err(e) => (e.to_string(), true),
                 };
 
                 events.emit(AgentEvent::ToolComplete(ToolCompleteEvent {
@@ -340,5 +329,520 @@ impl Agent {
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
+mod tests {
+    use super::*;
+    use crate::{
+        error::ToolCallError,
+        events::EventSink,
+        provider::{CompletionResponse, StopReason},
+        tool::{EmptyToolbox, ToolSpec, Toolbox},
+    };
+    use async_trait::async_trait;
+    use models::agent::{ContentPart, TextPart, ToolCallPart, Usage};
+    use models::events::AgentEvent;
+    use serde_json::{Value, json};
+    use std::sync::{Arc, Mutex};
+    use tokio_util::sync::CancellationToken;
+
+    // --- support types ---
+
+    struct MockProvider {
+        responses: Vec<CompletionResponse>,
+        call_index: Mutex<usize>,
+    }
+
+    impl MockProvider {
+        fn new(responses: Vec<CompletionResponse>) -> Arc<Self> {
+            Arc::new(Self {
+                responses,
+                call_index: Mutex::new(0),
+            })
+        }
+
+        fn text(text: &str) -> Arc<Self> {
+            Self::new(vec![CompletionResponse {
+                parts: vec![ContentPart::Text(TextPart {
+                    text: text.to_string(),
+                })],
+                stop_reason: StopReason::EndTurn,
+                usage: Usage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                },
+            }])
+        }
+
+        fn tool_then_text(tool_id: &str, tool_name: &str, input: Value, reply: &str) -> Arc<Self> {
+            Self::new(vec![
+                CompletionResponse {
+                    parts: vec![ContentPart::ToolCall(ToolCallPart {
+                        id: tool_id.to_string(),
+                        name: tool_name.to_string(),
+                        input,
+                    })],
+                    stop_reason: StopReason::ToolUse,
+                    usage: Usage {
+                        input_tokens: 20,
+                        output_tokens: 10,
+                    },
+                },
+                CompletionResponse {
+                    parts: vec![ContentPart::Text(TextPart {
+                        text: reply.to_string(),
+                    })],
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage {
+                        input_tokens: 30,
+                        output_tokens: 8,
+                    },
+                },
+            ])
+        }
+    }
+
+    #[async_trait]
+    impl crate::provider::LlmProvider for MockProvider {
+        fn model_id(&self) -> &str {
+            "mock-model"
+        }
+
+        async fn complete(
+            &self,
+            _request: crate::provider::CompletionRequest<'_>,
+            _message_id: &str,
+            _events: &dyn EventSink,
+        ) -> Result<CompletionResponse, crate::error::LlmError> {
+            let mut idx = self.call_index.lock().unwrap();
+            let response = self.responses[*idx % self.responses.len()].clone();
+            *idx += 1;
+            Ok(response)
+        }
+    }
+
+    type ToolHandler = Arc<dyn Fn(&str, Value) -> Result<Value, ToolCallError> + Send + Sync>;
+
+    struct MockToolbox {
+        specs: Vec<ToolSpec>,
+        handler: ToolHandler,
+    }
+
+    impl MockToolbox {
+        fn echo(name: &str) -> Arc<Self> {
+            let spec = ToolSpec {
+                name: name.to_string(),
+                description: "echo tool".to_string(),
+                input_schema: json!({ "type": "object" }),
+            };
+            Arc::new(Self {
+                specs: vec![spec],
+                handler: Arc::new(|_, input| Ok(input)),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Toolbox for MockToolbox {
+        fn specs(&self) -> Vec<ToolSpec> {
+            self.specs.clone()
+        }
+
+        async fn execute(&self, name: &str, input: Value) -> Result<Value, ToolCallError> {
+            (self.handler)(name, input)
+        }
+    }
+
+    struct CollectingEventSink {
+        events: Mutex<Vec<AgentEvent>>,
+    }
+
+    impl CollectingEventSink {
+        fn new() -> Self {
+            Self {
+                events: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn events(&self) -> Vec<AgentEvent> {
+            self.events.lock().unwrap().clone()
+        }
+
+        fn message_complete_ids(&self) -> Vec<String> {
+            self.events()
+                .into_iter()
+                .filter_map(|e| match e {
+                    AgentEvent::MessageComplete(mc) => Some(mc.message_id),
+                    _ => None,
+                })
+                .collect()
+        }
+    }
+
+    impl EventSink for CollectingEventSink {
+        fn emit(&self, event: AgentEvent) {
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
+    // --- tests ---
+
+    #[tokio::test]
+    async fn test_simple_text_completion() {
+        let mut agent = Agent::builder(MockProvider::text("Hello, world!"), Arc::new(EmptyToolbox))
+            .build()
+            .unwrap();
+        let sink = CollectingEventSink::new();
+        let output = agent
+            .run(
+                AgentInput::user_message("msg-1", "hi"),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        match output.result {
+            AgentResult::Completed { text } => assert_eq!(text, "Hello, world!"),
+            other => panic!(
+                "expected Completed, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+        assert_eq!(output.usage.output_tokens, 5);
+    }
+
+    #[tokio::test]
+    async fn test_completion_emits_message_complete_events() {
+        let mut agent = Agent::builder(MockProvider::text("done"), Arc::new(EmptyToolbox))
+            .build()
+            .unwrap();
+        let sink = CollectingEventSink::new();
+        agent
+            .run(
+                AgentInput::user_message("msg-1", "go"),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            !sink.message_complete_ids().is_empty(),
+            "expected at least 1 MessageComplete event, got 0"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_input_message_event_emitted() {
+        let mut agent = Agent::builder(MockProvider::text("ok"), Arc::new(EmptyToolbox))
+            .build()
+            .unwrap();
+        let sink = CollectingEventSink::new();
+        agent
+            .run(
+                AgentInput::user_message("msg-1", "x"),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        let ie = sink
+            .events()
+            .into_iter()
+            .find_map(|e| match e {
+                AgentEvent::InputMessage(ie) => Some(ie),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(ie.message_id, "msg-1");
+        assert!(matches!(ie.input, AgentInput::UserMessage(_)));
+    }
+
+    #[tokio::test]
+    async fn test_run_complete_event_emitted() {
+        let mut agent = Agent::builder(MockProvider::text("ok"), Arc::new(EmptyToolbox))
+            .build()
+            .unwrap();
+        let sink = CollectingEventSink::new();
+        agent
+            .run(
+                AgentInput::user_message("msg-1", "x"),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        let count = sink
+            .events()
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::RunComplete(_)))
+            .count();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_tool_call_cycle() {
+        let provider =
+            MockProvider::tool_then_text("tc1", "search", json!({"q": "rust"}), "found it");
+        let toolbox = MockToolbox::echo("search");
+        let mut agent = Agent::builder(provider, toolbox).build().unwrap();
+        let sink = CollectingEventSink::new();
+
+        let output = agent
+            .run(
+                AgentInput::user_message("msg-1", "search rust"),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        match output.result {
+            AgentResult::Completed { text } => assert_eq!(text, "found it"),
+            other => panic!(
+                "expected Completed, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+        let events = sink.events();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ToolExecuting(_)))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ToolComplete(_)))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_result_message_id_is_derived_from_tool_call_id() {
+        let provider = MockProvider::tool_then_text("tc1", "calc", json!({"x": 1}), "result: 1");
+        let toolbox = MockToolbox::echo("calc");
+        let mut agent = Agent::builder(provider, toolbox).build().unwrap();
+        let sink = CollectingEventSink::new();
+
+        agent
+            .run(
+                AgentInput::user_message("msg-1", "calc"),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        let tc = sink
+            .events()
+            .into_iter()
+            .find_map(|e| match e {
+                AgentEvent::ToolComplete(tc) => Some(tc),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(tc.message_id, format!("result:{}", tc.tool_call_id));
+    }
+
+    #[tokio::test]
+    async fn test_handoff_tool_returns_handoff_result() {
+        let provider = MockProvider::new(vec![CompletionResponse {
+            parts: vec![ContentPart::ToolCall(ToolCallPart {
+                id: "hc1".to_string(),
+                name: "handoff".to_string(),
+                input: json!({"answer": 42}),
+            })],
+            stop_reason: StopReason::ToolUse,
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+            },
+        }]);
+        let mut agent = Agent::builder(provider, Arc::new(EmptyToolbox))
+            .with_handoff_tool("handoff")
+            .build()
+            .unwrap();
+        let sink = CollectingEventSink::new();
+
+        let output = agent
+            .run(
+                AgentInput::user_message("msg-1", "go"),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        match output.result {
+            AgentResult::Handoff { tool_name, data } => {
+                assert_eq!(tool_name, "handoff");
+                assert_eq!(data["answer"], 42);
+            }
+            other => panic!("expected Handoff, got {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resume_with_tool_result() {
+        let history = vec![
+            Message {
+                id: "m0".into(),
+                role: Role::User,
+                parts: vec![ContentPart::Text(TextPart {
+                    text: "question".into(),
+                })],
+            },
+            Message {
+                id: "m1".into(),
+                role: Role::Assistant,
+                parts: vec![ContentPart::ToolCall(ToolCallPart {
+                    id: "hc1".into(),
+                    name: "handoff".into(),
+                    input: json!({}),
+                })],
+            },
+        ];
+        let provider = MockProvider::text("thanks for the answer");
+        let mut agent = Agent::builder(provider, Arc::new(EmptyToolbox))
+            .with_history(history)
+            .build()
+            .unwrap();
+        let sink = CollectingEventSink::new();
+
+        let output = agent
+            .run(
+                AgentInput::tool_result("hc1", "42", false),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(output.result, AgentResult::Completed { .. }));
+
+        let ie = sink
+            .events()
+            .into_iter()
+            .find_map(|e| match e {
+                AgentEvent::InputMessage(ie) => Some(ie),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(ie.message_id, "result:hc1");
+        assert!(matches!(ie.input, AgentInput::ToolResult(_)));
+    }
+
+    #[tokio::test]
+    async fn test_max_iterations_exceeded() {
+        let provider = MockProvider::new(vec![CompletionResponse {
+            parts: vec![ContentPart::ToolCall(ToolCallPart {
+                id: "t1".into(),
+                name: "loop_tool".into(),
+                input: json!({}),
+            })],
+            stop_reason: StopReason::ToolUse,
+            usage: Usage {
+                input_tokens: 5,
+                output_tokens: 2,
+            },
+        }]);
+        let toolbox = MockToolbox::echo("loop_tool");
+        let config = AgentConfig {
+            max_iterations: 3,
+            stuck_threshold: 10,
+            nudge_threshold: 8,
+            max_tokens: None,
+        };
+        let mut agent = Agent::builder(provider, toolbox)
+            .with_config(config)
+            .build()
+            .unwrap();
+        let sink = CollectingEventSink::new();
+
+        let err = agent
+            .run(
+                AgentInput::user_message("msg-1", "go"),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AgentError::MaxIterationsExceeded { max: 3 }));
+    }
+
+    #[tokio::test]
+    async fn test_stuck_detection() {
+        let provider = MockProvider::new(vec![CompletionResponse {
+            parts: vec![ContentPart::ToolCall(ToolCallPart {
+                id: "s1".into(),
+                name: "stuck_tool".into(),
+                input: json!({"x": 1}),
+            })],
+            stop_reason: StopReason::ToolUse,
+            usage: Usage {
+                input_tokens: 5,
+                output_tokens: 2,
+            },
+        }]);
+        let toolbox = MockToolbox::echo("stuck_tool");
+        let config = AgentConfig {
+            max_iterations: 20,
+            stuck_threshold: 3,
+            nudge_threshold: 2,
+            max_tokens: None,
+        };
+        let mut agent = Agent::builder(provider, toolbox)
+            .with_config(config)
+            .build()
+            .unwrap();
+        let sink = CollectingEventSink::new();
+
+        let err = agent
+            .run(
+                AgentInput::user_message("msg-1", "go"),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AgentError::StuckInLoop { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_cancellation() {
+        let provider = MockProvider::new(vec![CompletionResponse {
+            parts: vec![ContentPart::ToolCall(ToolCallPart {
+                id: "c1".into(),
+                name: "some_tool".into(),
+                input: json!({}),
+            })],
+            stop_reason: StopReason::ToolUse,
+            usage: Usage {
+                input_tokens: 5,
+                output_tokens: 2,
+            },
+        }]);
+        let toolbox = MockToolbox::echo("some_tool");
+        let mut agent = Agent::builder(provider, toolbox).build().unwrap();
+        let sink = CollectingEventSink::new();
+        let token = CancellationToken::new();
+        token.cancel();
+
+        let err = agent
+            .run(AgentInput::user_message("msg-1", "go"), &sink, token)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AgentError::Cancelled));
     }
 }
