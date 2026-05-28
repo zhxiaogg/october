@@ -6,13 +6,13 @@ use crate::{
 use futures_util::{SinkExt, StreamExt};
 use models::executor::{
     CommandFailedEvent, CreateRuntimeCmd, DestroyRuntimeCmd, ExecutorCommand, ExecutorEvent,
-    ExecutorInboundMessage, ExecutorOutboundMessage, RegisteredEvent,
-    RestartRuntimeCmd, RuntimeState, RuntimeStateChangedEvent, RuntimesListedEvent,
+    ExecutorInboundMessage, ExecutorOutboundMessage, RegisteredEvent, RestartRuntimeCmd,
+    RuntimeState, RuntimeStateChangedEvent, RuntimesListedEvent,
 };
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
-use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream};
+use tokio_tungstenite::{MaybeTlsStream, connect_async, tungstenite::Message};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -26,8 +26,8 @@ type WsSink = Arc<
 >;
 
 async fn send_outbound(sink: &WsSink, msg: ExecutorOutboundMessage) -> Result<(), ExecutorError> {
-    let json = serde_json::to_string(&msg)
-        .map_err(|e| ExecutorError::Serialization(e.to_string()))?;
+    let json =
+        serde_json::to_string(&msg).map_err(|e| ExecutorError::Serialization(e.to_string()))?;
     sink.lock()
         .await
         .send(Message::Text(json.into()))
@@ -194,7 +194,9 @@ async fn do_create(
     sink: &WsSink,
     req: &str,
 ) -> Result<(), RuntimeError> {
-    registry.begin_create(&cmd.runtime_id, cmd.config.clone()).await?;
+    registry
+        .begin_create(&cmd.runtime_id, cmd.config.clone())
+        .await?;
     emit_state(sink, req, &cmd.runtime_id, RuntimeState::Creating).await;
     match provider.create(&cmd.runtime_id, &cmd.config).await {
         Ok(handle) => {
@@ -276,21 +278,21 @@ async fn run_health_check(
         if count >= max_restarts {
             continue;
         }
-        if let Some(config) = registry.get_config(&id).await {
-            if let Ok(old) = registry.begin_restart(&id).await {
-                emit_state(sink, &unsolicited, &id, RuntimeState::Creating).await;
-                if let Some(h) = old {
-                    let _ = h.stop().await;
+        if let Some(config) = registry.get_config(&id).await
+            && let Ok(old) = registry.begin_restart(&id).await
+        {
+            emit_state(sink, &unsolicited, &id, RuntimeState::Creating).await;
+            if let Some(h) = old {
+                let _ = h.stop().await;
+            }
+            match provider.create(&id, &config).await {
+                Ok(new_handle) => {
+                    let _ = registry.complete_create(&id, new_handle).await;
+                    emit_state(sink, &unsolicited, &id, RuntimeState::Running).await;
                 }
-                match provider.create(&id, &config).await {
-                    Ok(new_handle) => {
-                        let _ = registry.complete_create(&id, new_handle).await;
-                        emit_state(sink, &unsolicited, &id, RuntimeState::Running).await;
-                    }
-                    Err(_) => {
-                        let _ = registry.mark_failed(&id).await;
-                        emit_state(sink, &unsolicited, &id, RuntimeState::Failed).await;
-                    }
+                Err(_) => {
+                    let _ = registry.mark_failed(&id).await;
+                    emit_state(sink, &unsolicited, &id, RuntimeState::Failed).await;
                 }
             }
         }

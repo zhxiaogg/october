@@ -13,11 +13,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
-use tokio_tungstenite::{accept_async, tungstenite::Message, WebSocketStream};
+use tokio_tungstenite::{WebSocketStream, accept_async, tungstenite::Message};
 use uuid::Uuid;
 
-type WsSink =
-    Arc<Mutex<futures_util::stream::SplitSink<WebSocketStream<TcpStream>, Message>>>;
+type WsSink = Arc<Mutex<futures_util::stream::SplitSink<WebSocketStream<TcpStream>, Message>>>;
 
 struct WsCommandSink {
     sink: WsSink,
@@ -26,8 +25,8 @@ struct WsCommandSink {
 #[async_trait]
 impl CommandSink for WsCommandSink {
     async fn send(&self, msg: ExecutorInboundMessage) -> Result<(), ServerError> {
-        let json = serde_json::to_string(&msg)
-            .map_err(|e| ServerError::Serialization(e.to_string()))?;
+        let json =
+            serde_json::to_string(&msg).map_err(|e| ServerError::Serialization(e.to_string()))?;
         self.sink
             .lock()
             .await
@@ -56,7 +55,10 @@ impl Server {
         let registry = Arc::new(ExecutorRegistry::new());
         let reg = registry.clone();
         tokio::spawn(async move { accept_loop(listener, reg, handler).await });
-        Ok(Self { registry, local_addr })
+        Ok(Self {
+            registry,
+            local_addr,
+        })
     }
 
     pub fn local_addr(&self) -> SocketAddr {
@@ -129,15 +131,10 @@ async fn accept_loop(
     registry: Arc<ExecutorRegistry>,
     handler: Arc<dyn ExecutorEventHandler>,
 ) {
-    loop {
-        match listener.accept().await {
-            Ok((stream, _)) => {
-                let reg = registry.clone();
-                let hdl = handler.clone();
-                tokio::spawn(async move { handle_connection(stream, reg, hdl).await });
-            }
-            Err(_) => break,
-        }
+    while let Ok((stream, _)) = listener.accept().await {
+        let reg = registry.clone();
+        let hdl = handler.clone();
+        tokio::spawn(async move { handle_connection(stream, reg, hdl).await });
     }
 }
 
@@ -157,10 +154,10 @@ async fn handle_connection(
     let executor_id = loop {
         match stream.next().await {
             Some(Ok(Message::Text(text))) => {
-                if let Ok(msg) = serde_json::from_str::<ExecutorOutboundMessage>(&text) {
-                    if let models::executor::ExecutorEvent::Registered(ref ev) = msg.event {
-                        break ev.executor_id.clone();
-                    }
+                if let Ok(msg) = serde_json::from_str::<ExecutorOutboundMessage>(&text)
+                    && let models::executor::ExecutorEvent::Registered(ref ev) = msg.event
+                {
+                    break ev.executor_id.clone();
                 }
             }
             _ => return,

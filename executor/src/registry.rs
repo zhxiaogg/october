@@ -49,8 +49,9 @@ impl RuntimeRegistry {
         handle: Arc<dyn RuntimeHandle>,
     ) -> Result<(), RuntimeError> {
         let mut entries = self.entries.lock().await;
-        let entry =
-            entries.get_mut(id).ok_or_else(|| RuntimeError::NotFound(id.to_string()))?;
+        let entry = entries
+            .get_mut(id)
+            .ok_or_else(|| RuntimeError::NotFound(id.to_string()))?;
         entry.state = RuntimeState::Running;
         entry.handle = Some(handle);
         Ok(())
@@ -59,8 +60,9 @@ impl RuntimeRegistry {
     /// Transition any → Failed; clears handle.
     pub async fn mark_failed(&self, id: &str) -> Result<(), RuntimeError> {
         let mut entries = self.entries.lock().await;
-        let entry =
-            entries.get_mut(id).ok_or_else(|| RuntimeError::NotFound(id.to_string()))?;
+        let entry = entries
+            .get_mut(id)
+            .ok_or_else(|| RuntimeError::NotFound(id.to_string()))?;
         entry.state = RuntimeState::Failed;
         entry.handle = None;
         Ok(())
@@ -72,17 +74,20 @@ impl RuntimeRegistry {
         id: &str,
     ) -> Result<Option<Arc<dyn RuntimeHandle>>, RuntimeError> {
         let mut entries = self.entries.lock().await;
-        let entry =
-            entries.get_mut(id).ok_or_else(|| RuntimeError::NotFound(id.to_string()))?;
-        match entry.state {
+        let entry = entries
+            .get_mut(id)
+            .ok_or_else(|| RuntimeError::NotFound(id.to_string()))?;
+        match entry.state.clone() {
             RuntimeState::Running | RuntimeState::Failed => {
                 entry.state = RuntimeState::Stopping;
                 Ok(entry.handle.take())
             }
-            ref s => Err(RuntimeError::InvalidTransition {
-                from: format!("{s:?}"),
-                action: "stop".to_string(),
-            }),
+            s @ RuntimeState::Creating | s @ RuntimeState::Stopping | s @ RuntimeState::Stopped => {
+                Err(RuntimeError::InvalidTransition {
+                    from: format!("{s:?}"),
+                    action: "stop".to_string(),
+                })
+            }
         }
     }
 
@@ -103,18 +108,21 @@ impl RuntimeRegistry {
         id: &str,
     ) -> Result<Option<Arc<dyn RuntimeHandle>>, RuntimeError> {
         let mut entries = self.entries.lock().await;
-        let entry =
-            entries.get_mut(id).ok_or_else(|| RuntimeError::NotFound(id.to_string()))?;
-        match entry.state {
+        let entry = entries
+            .get_mut(id)
+            .ok_or_else(|| RuntimeError::NotFound(id.to_string()))?;
+        match entry.state.clone() {
             RuntimeState::Running | RuntimeState::Failed => {
                 entry.state = RuntimeState::Creating;
                 entry.restart_count += 1;
                 Ok(entry.handle.take())
             }
-            ref s => Err(RuntimeError::InvalidTransition {
-                from: format!("{s:?}"),
-                action: "restart".to_string(),
-            }),
+            s @ RuntimeState::Creating | s @ RuntimeState::Stopping | s @ RuntimeState::Stopped => {
+                Err(RuntimeError::InvalidTransition {
+                    from: format!("{s:?}"),
+                    action: "restart".to_string(),
+                })
+            }
         }
     }
 
@@ -207,7 +215,9 @@ mod tests {
     async fn test_complete_create_transitions_to_running() {
         let r = RuntimeRegistry::new();
         r.begin_create("rt-1", cfg()).await.unwrap();
-        r.complete_create("rt-1", Arc::new(NullHandle)).await.unwrap();
+        r.complete_create("rt-1", Arc::new(NullHandle))
+            .await
+            .unwrap();
         let list = r.list().await;
         assert!(matches!(list[0].state, RuntimeState::Running));
     }
@@ -216,7 +226,9 @@ mod tests {
     async fn test_begin_stop_transitions_to_stopping() {
         let r = RuntimeRegistry::new();
         r.begin_create("rt-1", cfg()).await.unwrap();
-        r.complete_create("rt-1", Arc::new(NullHandle)).await.unwrap();
+        r.complete_create("rt-1", Arc::new(NullHandle))
+            .await
+            .unwrap();
         let handle = r.begin_stop("rt-1").await.unwrap();
         assert!(handle.is_some());
         let list = r.list().await;
@@ -228,14 +240,19 @@ mod tests {
         let r = RuntimeRegistry::new();
         r.begin_create("rt-1", cfg()).await.unwrap();
         let result = r.begin_stop("rt-1").await;
-        assert!(matches!(result, Err(RuntimeError::InvalidTransition { .. })));
+        assert!(matches!(
+            result,
+            Err(RuntimeError::InvalidTransition { .. })
+        ));
     }
 
     #[tokio::test]
     async fn test_complete_stop_removes_entry() {
         let r = RuntimeRegistry::new();
         r.begin_create("rt-1", cfg()).await.unwrap();
-        r.complete_create("rt-1", Arc::new(NullHandle)).await.unwrap();
+        r.complete_create("rt-1", Arc::new(NullHandle))
+            .await
+            .unwrap();
         r.begin_stop("rt-1").await.unwrap();
         r.complete_stop("rt-1").await.unwrap();
         assert!(r.list().await.is_empty());
@@ -245,7 +262,9 @@ mod tests {
     async fn test_begin_restart_increments_restart_count() {
         let r = RuntimeRegistry::new();
         r.begin_create("rt-1", cfg()).await.unwrap();
-        r.complete_create("rt-1", Arc::new(NullHandle)).await.unwrap();
+        r.complete_create("rt-1", Arc::new(NullHandle))
+            .await
+            .unwrap();
         r.begin_restart("rt-1").await.unwrap();
         assert_eq!(r.get_restart_count("rt-1").await, Some(1));
         assert!(matches!(r.list().await[0].state, RuntimeState::Creating));
@@ -255,7 +274,9 @@ mod tests {
     async fn test_mark_failed_clears_handle() {
         let r = RuntimeRegistry::new();
         r.begin_create("rt-1", cfg()).await.unwrap();
-        r.complete_create("rt-1", Arc::new(NullHandle)).await.unwrap();
+        r.complete_create("rt-1", Arc::new(NullHandle))
+            .await
+            .unwrap();
         r.mark_failed("rt-1").await.unwrap();
         let list = r.list().await;
         assert!(matches!(list[0].state, RuntimeState::Failed));
@@ -266,7 +287,9 @@ mod tests {
     async fn test_running_handles_returns_only_running() {
         let r = RuntimeRegistry::new();
         r.begin_create("rt-1", cfg()).await.unwrap();
-        r.complete_create("rt-1", Arc::new(NullHandle)).await.unwrap();
+        r.complete_create("rt-1", Arc::new(NullHandle))
+            .await
+            .unwrap();
         r.begin_create("rt-2", cfg()).await.unwrap(); // still Creating
         let handles = r.running_handles().await;
         assert_eq!(handles.len(), 1);

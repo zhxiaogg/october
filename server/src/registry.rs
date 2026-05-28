@@ -26,7 +26,10 @@ impl ExecutorConn {
         command: ExecutorCommand,
     ) -> Result<(), ServerError> {
         self.sink
-            .send(ExecutorInboundMessage { request_id, command })
+            .send(ExecutorInboundMessage {
+                request_id,
+                command,
+            })
             .await
     }
 }
