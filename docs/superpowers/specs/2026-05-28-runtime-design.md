@@ -10,7 +10,7 @@ The runtime is a binary that runs inside a sandbox. It is started by the executo
 Server (Agent) → [RuntimeClient w/ ExecutorWsTransport] → ExecutorClient → Executor → [raw routing] → Runtime binary
 ```
 
-The executor acts as a relay between the server and the runtime. The runtime never communicates directly with the server. `RuntimeClient` (with `ExecutorWsTransport`) is used server-side to build tools; the executor does raw message forwarding and does not depend on `runtime-tools`.
+The executor acts as a relay between the server and the runtime. The runtime never communicates directly with the server. `RuntimeClient` (with `ExecutorWsTransport`) is used server-side to build tools; the executor does raw message forwarding and does not depend on `runtime-client`.
 
 ## Topology
 
@@ -185,7 +185,7 @@ impl ToolboxImpl {
 impl Toolbox for ToolboxImpl { ... }  // routes execute() by tool name
 ```
 
-## New `runtime-tools` crate
+## New `runtime-client` crate
 
 Pure transport layer — no tool execution. Sends tool calls to a runtime and surfaces results.
 
@@ -284,46 +284,22 @@ CancellationToken fires
 ## Testing
 
 **Unit tests (in-crate):**
-- `runtime-tools`: `MockTransport` verifies call serialisation, `call_id` threading, result/error surfacing
+- `runtime-client`: `MockTransport` verifies call serialisation, `call_id` threading, result/error surfacing
 - `agentcore`: `ToolboxImpl` dispatch correctness (routes by name, `ToolCallError` for unknown tool)
 - `runtime` binary: tool fn tests with `tempdir` — the only place real execution is tested
-
-**Integration tests (`tests/` crate) — executor + runtime over WS:**
-
-```rust
-// Test spins up a mock WS server; executor connects outbound to it
-let mock_server = MockWsServer::bind().await;
-let executor = Executor::new(executor_id, mock_server.addr(), ProcessRuntimeProvider::new());
-tokio::spawn(executor.run(cancel.clone()));
-let client = ExecutorClient::new(WsExecutorTransport::accept(mock_server).await);
-
-// Lifecycle
-client.create_runtime("r1", RuntimeConfig { working_dir: "/tmp/test".into() }).await?;
-
-// Tool call round-trip
-let result = client.invoke_tool("r1", ToolCall::Bash { command: "echo hi".into() }).await?;
-assert_eq!(result.stdout, "hi\n");
-
-// Cancellation
-client.cancel_tool_call("r1", &call_id).await?;
-```
-
-`ProcessRuntimeProvider` spawns the `october-runtime` binary as a child process — the same binary that runs in a sandbox, tested locally with identical behaviour.
 
 ## Crate dependency graph
 
 ```
 models          ← fluorite-generated types (executor.fl, runtime.fl, agent.fl, events.fl)
 agentcore       ← Tool trait, ToolboxImpl, Toolbox trait, Agent
-runtime-tools   ← RuntimeClient, RuntimeTransport, WsTransports, BashTool, ReadFileTool, ...
+runtime-client   ← RuntimeClient, RuntimeTransport, WsTransports, BashTool, ReadFileTool, ...
                   depends on: models, agentcore
 executor        ← Executor, ProcessRuntimeProvider, ConnectedRuntimeRegistry
                   depends on: models
-                  (does raw WS message routing to runtimes — no runtime-tools dependency)
+                  (does raw WS message routing to runtimes — no runtime-client dependency)
 server          ← Server, ExecutorClient, ExecutorTransport, WsExecutorTransport
-                  depends on: models, runtime-tools
+                  depends on: models, runtime-client
 runtime (bin)   ← october-runtime binary, tool fns
                   depends on: models
-tests           ← integration tests
-                  depends on: server, executor, runtime-tools, models
 ```
