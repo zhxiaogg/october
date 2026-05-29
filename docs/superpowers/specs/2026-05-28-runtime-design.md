@@ -7,10 +7,10 @@
 The runtime is a binary that runs inside a sandbox. It is started by the executor, connects back to the executor via WebSocket, and executes tools on behalf of an agent running server-side. Tool calls flow:
 
 ```
-Server (Agent) → ExecutorClient → Executor → RuntimeClient → Runtime binary
+Server (Agent) → [RuntimeClient w/ ExecutorWsTransport] → ExecutorClient → Executor → [raw routing] → Runtime binary
 ```
 
-The executor acts as a relay between the server and the runtime. The runtime never communicates directly with the server.
+The executor acts as a relay between the server and the runtime. The runtime never communicates directly with the server. `RuntimeClient` (with `ExecutorWsTransport`) is used server-side to build tools; the executor does raw message forwarding and does not depend on `runtime-tools`.
 
 ## Topology
 
@@ -209,8 +209,7 @@ impl RuntimeClient {
 ```
 
 **Transport implementations:**
-- `ExecutorWsTransport` (server side): wraps `ToolCallCmd` / `ToolResultEvent` over the executor WS. Maintains a pending map of `call_id → oneshot::Sender<ToolResult>`. The server's `ExecutorEventHandler` resolves pending oneshotsits when `ToolResultEvent` arrives.
-- `RuntimeWsTransport` (executor side): wraps `RuntimeInboundMessage::ToolCall` / `ToolCallResponse` over the runtime WS. Same correlation pattern.
+- `ExecutorWsTransport` (server side): wraps `ToolCallCmd` / `ToolResultEvent` over the executor WS. Maintains a pending map of `call_id → oneshot::Sender<ToolResult>`. The server's `ExecutorEventHandler` resolves pending oneshots when `ToolResultEvent` arrives.
 
 **Individual tools** (`BashTool`, `ReadFileTool`, `WriteFileTool`, `EditFileTool`, `ReplaceInFileTool`, `ListFilesTool`, `GlobTool`, `GrepTool`) — each holds a `RuntimeClient` and implements `Tool`.
 
@@ -320,6 +319,7 @@ runtime-tools   ← RuntimeClient, RuntimeTransport, WsTransports, BashTool, Rea
                   depends on: models, agentcore
 executor        ← Executor, ProcessRuntimeProvider, ConnectedRuntimeRegistry
                   depends on: models
+                  (does raw WS message routing to runtimes — no runtime-tools dependency)
 server          ← Server, ExecutorClient, ExecutorTransport, WsExecutorTransport
                   depends on: models, runtime-tools
 runtime (bin)   ← october-runtime binary, tool fns
