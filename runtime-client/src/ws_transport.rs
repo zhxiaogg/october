@@ -34,10 +34,10 @@ impl ExecutorWsTransport {
 
         tokio::spawn(async move {
             while let Some(Ok(Message::Text(text))) = stream.next().await {
-                if let Ok(msg) = serde_json::from_str::<ExecutorOutboundMessage>(&text) {
-                    if let Some(tx) = pending_clone.lock().await.get(&msg.request_id) {
-                        let _ = tx.send(msg.event).await;
-                    }
+                if let Ok(msg) = serde_json::from_str::<ExecutorOutboundMessage>(&text)
+                    && let Some(tx) = pending_clone.lock().await.get(&msg.request_id)
+                {
+                    let _ = tx.send(msg.event).await;
                 }
             }
         });

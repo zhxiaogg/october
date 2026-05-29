@@ -38,6 +38,7 @@ impl ToolboxImpl {
         Self { tools: Vec::new() }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn add(mut self, tool: impl Tool + 'static) -> Self {
         self.tools.push(Box::new(tool));
         self
