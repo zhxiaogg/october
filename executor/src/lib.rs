@@ -10,5 +10,5 @@ pub use error::{ExecutorError, RuntimeError};
 pub use executor::Executor;
 pub use process_provider::ProcessRuntimeProvider;
 pub use provider::{HealthStatus, RuntimeHandle, RuntimeProvider};
-pub(crate) use connected_registry::{ConnectedRuntimeRegistry, RuntimeSink};
-pub(crate) use runtime_listener::RuntimeListenerServer;
+pub use connected_registry::{ConnectedRuntimeRegistry, RuntimeSink};
+pub use runtime_listener::RuntimeListenerServer;

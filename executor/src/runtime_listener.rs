@@ -4,7 +4,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::{WebSocketStream, accept_async};
 
 /// Listens for incoming WebSocket connections from runtime binaries.
-pub(crate) struct RuntimeListenerServer {
+pub struct RuntimeListenerServer {
     listener: TcpListener,
     local_addr: SocketAddr,
 }

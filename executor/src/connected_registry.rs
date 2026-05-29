@@ -6,7 +6,7 @@ use tokio::sync::{Mutex, oneshot};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
 
-pub(crate) type RuntimeSink = Arc<
+pub type RuntimeSink = Arc<
     Mutex<
         futures_util::stream::SplitSink<WebSocketStream<TcpStream>, Message>,
     >,
@@ -18,8 +18,14 @@ struct Inner {
 }
 
 /// Tracks live WebSocket connections from runtime binaries.
-pub(crate) struct ConnectedRuntimeRegistry {
+pub struct ConnectedRuntimeRegistry {
     inner: Mutex<Inner>,
+}
+
+impl Default for ConnectedRuntimeRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ConnectedRuntimeRegistry {
