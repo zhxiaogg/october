@@ -172,6 +172,7 @@ async fn dispatch(
             .await;
             Ok(())
         }
+        ExecutorCommand::ToolCall(_) | ExecutorCommand::CancelToolCall(_) => Ok(()),
     };
     if let Err(e) = result {
         let _ = send_outbound(

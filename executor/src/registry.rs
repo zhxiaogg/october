@@ -190,7 +190,7 @@ mod tests {
     }
 
     fn cfg() -> RuntimeConfig {
-        RuntimeConfig {}
+        RuntimeConfig { working_dir: "/tmp".to_string() }
     }
 
     #[tokio::test]
