@@ -6,7 +6,10 @@ pub async fn exec(working_dir: &Path, input: GrepInput) -> ToolResult {
         Some(p) => working_dir.join(p),
         None => working_dir.to_path_buf(),
     };
-    let file_pat = input.file_pattern.clone().unwrap_or_else(|| "**/*".to_string());
+    let file_pat = input
+        .file_pattern
+        .clone()
+        .unwrap_or_else(|| "**/*".to_string());
     let max = input.max_results.unwrap_or(1000) as usize;
     let pattern = input.pattern.clone();
     match tokio::task::spawn_blocking(move || {
@@ -31,14 +34,25 @@ pub async fn exec(working_dir: &Path, input: GrepInput) -> ToolResult {
     })
     .await
     {
-        Ok(Ok(stdout)) => ToolResult::Ok(ToolOutput { stdout, stderr: String::new(), exit_code: 0 }),
+        Ok(Ok(stdout)) => ToolResult::Ok(ToolOutput {
+            stdout,
+            stderr: String::new(),
+            exit_code: 0,
+        }),
         Ok(Err(reason)) => ToolResult::Err(ToolError { reason }),
-        Err(e) => ToolResult::Err(ToolError { reason: e.to_string() }),
+        Err(e) => ToolResult::Err(ToolError {
+            reason: e.to_string(),
+        }),
     }
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::wildcard_enum_match_arm)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
@@ -47,7 +61,16 @@ mod tests {
     async fn grep_finds_match() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("f.txt"), "hello world\nfoo bar").unwrap();
-        let result = exec(dir.path(), GrepInput { pattern: "hello".into(), path: None, file_pattern: None, max_results: None }).await;
+        let result = exec(
+            dir.path(),
+            GrepInput {
+                pattern: "hello".into(),
+                path: None,
+                file_pattern: None,
+                max_results: None,
+            },
+        )
+        .await;
         match result {
             ToolResult::Ok(o) => assert!(o.stdout.contains("hello world")),
             ToolResult::Err(e) => panic!("{}", e.reason),

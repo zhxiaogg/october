@@ -49,11 +49,7 @@ impl ExecutorClient {
         }
     }
 
-    pub async fn create_runtime(
-        &self,
-        id: &str,
-        config: RuntimeConfig,
-    ) -> Result<(), ClientError> {
+    pub async fn create_runtime(&self, id: &str, config: RuntimeConfig) -> Result<(), ClientError> {
         let req = Uuid::new_v4().to_string();
         let mut rx = self
             .transport
@@ -67,13 +63,11 @@ impl ExecutorClient {
             .await?;
         loop {
             match rx.recv().await {
-                Some(ExecutorEvent::RuntimeStateChanged(e))
-                    if e.state == RuntimeState::Running =>
-                {
-                    return Ok(())
+                Some(ExecutorEvent::RuntimeStateChanged(e)) if e.state == RuntimeState::Running => {
+                    return Ok(());
                 }
                 Some(ExecutorEvent::CommandFailed(e)) => {
-                    return Err(ClientError::CommandFailed(e.message))
+                    return Err(ClientError::CommandFailed(e.message));
                 }
                 Some(_) => continue,
                 None => return Err(ClientError::Disconnected),
@@ -94,13 +88,11 @@ impl ExecutorClient {
             .await?;
         loop {
             match rx.recv().await {
-                Some(ExecutorEvent::RuntimeStateChanged(e))
-                    if e.state == RuntimeState::Stopped =>
-                {
-                    return Ok(())
+                Some(ExecutorEvent::RuntimeStateChanged(e)) if e.state == RuntimeState::Stopped => {
+                    return Ok(());
                 }
                 Some(ExecutorEvent::CommandFailed(e)) => {
-                    return Err(ClientError::CommandFailed(e.message))
+                    return Err(ClientError::CommandFailed(e.message));
                 }
                 Some(_) => continue,
                 None => return Err(ClientError::Disconnected),
@@ -133,10 +125,10 @@ impl ExecutorClient {
                     return match ev.result {
                         ToolResult::Ok(o) => Ok(o),
                         ToolResult::Err(e) => Err(ClientError::ToolFailed(e.reason)),
-                    }
+                    };
                 }
                 Some(ExecutorEvent::CommandFailed(e)) => {
-                    return Err(ClientError::CommandFailed(e.message))
+                    return Err(ClientError::CommandFailed(e.message));
                 }
                 Some(_) => continue,
                 None => return Err(ClientError::Disconnected),
@@ -214,8 +206,8 @@ impl ExecutorTransport for WsExecutorTransport {
             request_id: request_id.to_string(),
             command: cmd,
         };
-        let json = serde_json::to_string(&msg)
-            .map_err(|e| ClientError::Serialization(e.to_string()))?;
+        let json =
+            serde_json::to_string(&msg).map_err(|e| ClientError::Serialization(e.to_string()))?;
         self.sender
             .lock()
             .await

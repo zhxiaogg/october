@@ -37,9 +37,7 @@ impl RuntimeClient {
         let call_id = Uuid::new_v4().to_string();
         match self.inner.invoke(&call_id, call).await {
             Ok(ToolResult::Ok(output)) => Ok(output),
-            Ok(ToolResult::Err(ToolError { reason })) => {
-                Err(RuntimeCallError::ToolFailed(reason))
-            }
+            Ok(ToolResult::Err(ToolError { reason })) => Err(RuntimeCallError::ToolFailed(reason)),
             Err(e) => Err(RuntimeCallError::Transport(e)),
         }
     }
@@ -50,7 +48,12 @@ impl RuntimeClient {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::wildcard_enum_match_arm)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
 mod tests {
     use super::*;
     use crate::transport::MockTransport;
@@ -60,7 +63,9 @@ mod tests {
     async fn client_returns_ok_output() {
         let client = RuntimeClient::new(MockTransport::ok("hello"));
         let output = client
-            .invoke(ToolCall::Bash(BashInput { command: "echo hello".into() }))
+            .invoke(ToolCall::Bash(BashInput {
+                command: "echo hello".into(),
+            }))
             .await
             .unwrap();
         assert_eq!(output.stdout, "hello");
@@ -70,7 +75,9 @@ mod tests {
     async fn client_returns_err_on_tool_failure() {
         let client = RuntimeClient::new(MockTransport::err("oops"));
         let err = client
-            .invoke(ToolCall::Bash(BashInput { command: "bad".into() }))
+            .invoke(ToolCall::Bash(BashInput {
+                command: "bad".into(),
+            }))
             .await
             .unwrap_err();
         assert!(matches!(err, RuntimeCallError::ToolFailed(_)));

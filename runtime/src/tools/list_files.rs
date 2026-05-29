@@ -18,14 +18,25 @@ pub async fn exec(working_dir: &Path, input: ListFilesInput) -> ToolResult {
     })
     .await
     {
-        Ok(Ok(stdout)) => ToolResult::Ok(ToolOutput { stdout, stderr: String::new(), exit_code: 0 }),
+        Ok(Ok(stdout)) => ToolResult::Ok(ToolOutput {
+            stdout,
+            stderr: String::new(),
+            exit_code: 0,
+        }),
         Ok(Err(reason)) => ToolResult::Err(ToolError { reason }),
-        Err(e) => ToolResult::Err(ToolError { reason: e.to_string() }),
+        Err(e) => ToolResult::Err(ToolError {
+            reason: e.to_string(),
+        }),
     }
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::wildcard_enum_match_arm)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
 mod tests {
     use super::*;
     use tempfile::TempDir;

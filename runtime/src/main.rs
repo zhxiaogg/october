@@ -45,12 +45,10 @@ type WsSink = Arc<
 async fn main() {
     let cli = Cli::parse();
 
-    let (ws, _) = connect_async(&cli.executor_url)
-        .await
-        .unwrap_or_else(|e| {
-            eprintln!("failed to connect to executor: {e}");
-            std::process::exit(1);
-        });
+    let (ws, _) = connect_async(&cli.executor_url).await.unwrap_or_else(|e| {
+        eprintln!("failed to connect to executor: {e}");
+        std::process::exit(1);
+    });
 
     let (sink_raw, mut stream) = ws.split();
     let sink: WsSink = Arc::new(Mutex::new(sink_raw));
@@ -87,8 +85,7 @@ async fn main() {
                         let in_flight_clone = in_flight.clone();
 
                         let handle = tokio::spawn(async move {
-                            let result =
-                                runtime::tools::dispatch(&working_dir, req.call).await;
+                            let result = runtime::tools::dispatch(&working_dir, req.call).await;
                             let response = serde_json::to_string(
                                 &RuntimeOutboundMessage::ToolCallResponse(ToolCallResponse {
                                     call_id: call_id.clone(),
@@ -105,7 +102,10 @@ async fn main() {
                             in_flight_clone.lock().await.remove(&call_id);
                         });
 
-                        in_flight.lock().await.insert(req.call_id, handle.abort_handle());
+                        in_flight
+                            .lock()
+                            .await
+                            .insert(req.call_id, handle.abort_handle());
                     }
                     RuntimeInboundMessage::CancelCall(req) => {
                         if let Some(handle) = in_flight.lock().await.remove(&req.call_id) {

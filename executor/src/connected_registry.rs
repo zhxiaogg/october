@@ -6,11 +6,8 @@ use tokio::sync::{Mutex, oneshot};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
 
-pub type RuntimeSink = Arc<
-    Mutex<
-        futures_util::stream::SplitSink<WebSocketStream<TcpStream>, Message>,
-    >,
->;
+pub type RuntimeSink =
+    Arc<Mutex<futures_util::stream::SplitSink<WebSocketStream<TcpStream>, Message>>>;
 
 struct Inner {
     sinks: HashMap<String, RuntimeSink>,

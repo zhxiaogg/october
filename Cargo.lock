@@ -1863,6 +1863,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtime-client"
+version = "0.1.0"
+dependencies = [
+ "agentcore",
+ "async-trait",
+ "futures-util",
+ "models",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-tungstenite",
+ "uuid",
+]
+
+[[package]]
 name = "rustc-hash"
 version = "2.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

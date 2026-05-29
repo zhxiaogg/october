@@ -4,8 +4,14 @@ use async_trait::async_trait;
 use models::runtime::{GrepInput, ToolCall};
 use serde_json::{Value, json};
 
-pub struct GrepTool { client: RuntimeClient }
-impl GrepTool { pub fn new(client: RuntimeClient) -> Self { Self { client } } }
+pub struct GrepTool {
+    client: RuntimeClient,
+}
+impl GrepTool {
+    pub fn new(client: RuntimeClient) -> Self {
+        Self { client }
+    }
+}
 
 #[async_trait]
 impl Tool for GrepTool {
@@ -26,12 +32,22 @@ impl Tool for GrepTool {
         }
     }
     async fn execute(&self, input: Value) -> Result<Value, ToolCallError> {
-        let pattern = input["pattern"].as_str().ok_or_else(|| ToolCallError::InvalidInput("missing 'pattern'".into()))?.to_string();
+        let pattern = input["pattern"]
+            .as_str()
+            .ok_or_else(|| ToolCallError::InvalidInput("missing 'pattern'".into()))?
+            .to_string();
         let path = input["path"].as_str().map(|s| s.to_string());
         let file_pattern = input["file_pattern"].as_str().map(|s| s.to_string());
         let max_results = input["max_results"].as_u64();
-        self.client.invoke(ToolCall::Grep(GrepInput { pattern, path, file_pattern, max_results }))
-            .await.map(|o| Value::String(o.stdout))
+        self.client
+            .invoke(ToolCall::Grep(GrepInput {
+                pattern,
+                path,
+                file_pattern,
+                max_results,
+            }))
+            .await
+            .map(|o| Value::String(o.stdout))
             .map_err(|e: RuntimeCallError| ToolCallError::ExecutionFailed(e.to_string()))
     }
 }

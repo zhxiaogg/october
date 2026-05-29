@@ -54,7 +54,9 @@ impl Toolbox for ToolboxImpl {
     async fn execute(&self, name: &str, input: Value) -> Result<Value, ToolCallError> {
         match self.tools.iter().find(|t| t.spec().name == name) {
             Some(tool) => tool.execute(input).await,
-            None => Err(ToolCallError::InvalidInput(format!("no tool named '{name}'"))),
+            None => Err(ToolCallError::InvalidInput(format!(
+                "no tool named '{name}'"
+            ))),
         }
     }
 }

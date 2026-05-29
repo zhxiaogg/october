@@ -4,8 +4,14 @@ use async_trait::async_trait;
 use models::runtime::{ListFilesInput, ToolCall};
 use serde_json::{Value, json};
 
-pub struct ListFilesTool { client: RuntimeClient }
-impl ListFilesTool { pub fn new(client: RuntimeClient) -> Self { Self { client } } }
+pub struct ListFilesTool {
+    client: RuntimeClient,
+}
+impl ListFilesTool {
+    pub fn new(client: RuntimeClient) -> Self {
+        Self { client }
+    }
+}
 
 #[async_trait]
 impl Tool for ListFilesTool {
@@ -21,9 +27,14 @@ impl Tool for ListFilesTool {
         }
     }
     async fn execute(&self, input: Value) -> Result<Value, ToolCallError> {
-        let path = input["path"].as_str().ok_or_else(|| ToolCallError::InvalidInput("missing 'path'".into()))?.to_string();
-        self.client.invoke(ToolCall::ListFiles(ListFilesInput { path }))
-            .await.map(|o| Value::String(o.stdout))
+        let path = input["path"]
+            .as_str()
+            .ok_or_else(|| ToolCallError::InvalidInput("missing 'path'".into()))?
+            .to_string();
+        self.client
+            .invoke(ToolCall::ListFiles(ListFilesInput { path }))
+            .await
+            .map(|o| Value::String(o.stdout))
             .map_err(|e: RuntimeCallError| ToolCallError::ExecutionFailed(e.to_string()))
     }
 }

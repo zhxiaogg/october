@@ -9,8 +9,8 @@ use futures_util::{SinkExt, StreamExt};
 use models::executor::{
     CancelToolCallCmd, CommandFailedEvent, CreateRuntimeCmd, DestroyRuntimeCmd, ExecutorCommand,
     ExecutorEvent, ExecutorInboundMessage, ExecutorOutboundMessage, RegisteredEvent,
-    RestartRuntimeCmd, RuntimeState, RuntimeStateChangedEvent, RuntimesListedEvent,
-    ToolCallCmd, ToolResultEvent,
+    RestartRuntimeCmd, RuntimeState, RuntimeStateChangedEvent, RuntimesListedEvent, ToolCallCmd,
+    ToolResultEvent,
 };
 use models::runtime::{
     CancelCallRequest, RuntimeInboundMessage, RuntimeOutboundMessage, ToolCallRequest,
@@ -219,12 +219,8 @@ async fn dispatch(
             .await;
             Ok(())
         }
-        ExecutorCommand::ToolCall(cmd) => {
-            do_tool_call(cmd, connected_registry, sink, req).await
-        }
-        ExecutorCommand::CancelToolCall(cmd) => {
-            do_cancel_tool_call(cmd, connected_registry).await
-        }
+        ExecutorCommand::ToolCall(cmd) => do_tool_call(cmd, connected_registry, sink, req).await,
+        ExecutorCommand::CancelToolCall(cmd) => do_cancel_tool_call(cmd, connected_registry).await,
     };
     if let Err(e) = result {
         let _ = send_outbound(
@@ -246,15 +242,13 @@ async fn do_tool_call(
     _sink: &WsSink,
     _req: &str,
 ) -> Result<(), RuntimeError> {
-    let reg = connected_registry.ok_or_else(|| {
-        RuntimeError::Provider("no runtime listener configured".to_string())
-    })?;
+    let reg = connected_registry
+        .ok_or_else(|| RuntimeError::Provider("no runtime listener configured".to_string()))?;
     let msg = RuntimeInboundMessage::ToolCall(ToolCallRequest {
         call_id: cmd.call.call_id.clone(),
         call: cmd.call.call.clone(),
     });
-    let json = serde_json::to_string(&msg)
-        .map_err(|e| RuntimeError::Provider(e.to_string()))?;
+    let json = serde_json::to_string(&msg).map_err(|e| RuntimeError::Provider(e.to_string()))?;
     reg.send_to(&cmd.runtime_id, json)
         .await
         .map_err(|e| RuntimeError::Provider(e.to_string()))
@@ -264,14 +258,12 @@ async fn do_cancel_tool_call(
     cmd: &CancelToolCallCmd,
     connected_registry: Option<&Arc<ConnectedRuntimeRegistry>>,
 ) -> Result<(), RuntimeError> {
-    let reg = connected_registry.ok_or_else(|| {
-        RuntimeError::Provider("no runtime listener configured".to_string())
-    })?;
+    let reg = connected_registry
+        .ok_or_else(|| RuntimeError::Provider("no runtime listener configured".to_string()))?;
     let msg = RuntimeInboundMessage::CancelCall(CancelCallRequest {
         call_id: cmd.call_id.clone(),
     });
-    let json = serde_json::to_string(&msg)
-        .map_err(|e| RuntimeError::Provider(e.to_string()))?;
+    let json = serde_json::to_string(&msg).map_err(|e| RuntimeError::Provider(e.to_string()))?;
     // Best-effort
     let _ = reg.send_to(&cmd.runtime_id, json).await;
     Ok(())

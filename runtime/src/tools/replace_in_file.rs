@@ -8,7 +8,8 @@ pub async fn exec(working_dir: &Path, input: ReplaceInFileInput) -> ToolResult {
         let new_content = match &input.mode {
             ReplaceMode::Regex(r) => {
                 let re = regex::Regex::new(&r.pattern).map_err(|e| e.to_string())?;
-                re.replace_all(&content, input.replacement.as_str()).into_owned()
+                re.replace_all(&content, input.replacement.as_str())
+                    .into_owned()
             }
             ReplaceMode::Lines(l) => {
                 let mut lines: Vec<&str> = content.lines().collect();
@@ -24,8 +25,14 @@ pub async fn exec(working_dir: &Path, input: ReplaceInFileInput) -> ToolResult {
     })
     .await
     {
-        Ok(Ok(stdout)) => ToolResult::Ok(ToolOutput { stdout, stderr: String::new(), exit_code: 0 }),
+        Ok(Ok(stdout)) => ToolResult::Ok(ToolOutput {
+            stdout,
+            stderr: String::new(),
+            exit_code: 0,
+        }),
         Ok(Err(reason)) => ToolResult::Err(ToolError { reason }),
-        Err(e) => ToolResult::Err(ToolError { reason: e.to_string() }),
+        Err(e) => ToolResult::Err(ToolError {
+            reason: e.to_string(),
+        }),
     }
 }

@@ -19,8 +19,14 @@ pub async fn exec(working_dir: &Path, input: GlobInput) -> ToolResult {
     })
     .await
     {
-        Ok(Ok(stdout)) => ToolResult::Ok(ToolOutput { stdout, stderr: String::new(), exit_code: 0 }),
+        Ok(Ok(stdout)) => ToolResult::Ok(ToolOutput {
+            stdout,
+            stderr: String::new(),
+            exit_code: 0,
+        }),
         Ok(Err(reason)) => ToolResult::Err(ToolError { reason }),
-        Err(e) => ToolResult::Err(ToolError { reason: e.to_string() }),
+        Err(e) => ToolResult::Err(ToolError {
+            reason: e.to_string(),
+        }),
     }
 }

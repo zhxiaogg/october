@@ -14,11 +14,7 @@ pub enum TransportError {
 
 #[async_trait]
 pub trait RuntimeTransport: Send + Sync {
-    async fn invoke(
-        &self,
-        call_id: &str,
-        call: ToolCall,
-    ) -> Result<ToolResult, TransportError>;
+    async fn invoke(&self, call_id: &str, call: ToolCall) -> Result<ToolResult, TransportError>;
 
     async fn cancel(&self, call_id: &str) -> Result<(), TransportError>;
 }

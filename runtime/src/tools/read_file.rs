@@ -23,14 +23,25 @@ pub async fn exec(working_dir: &Path, input: ReadFileInput) -> ToolResult {
     })
     .await
     {
-        Ok(Ok(stdout)) => ToolResult::Ok(ToolOutput { stdout, stderr: String::new(), exit_code: 0 }),
+        Ok(Ok(stdout)) => ToolResult::Ok(ToolOutput {
+            stdout,
+            stderr: String::new(),
+            exit_code: 0,
+        }),
         Ok(Err(reason)) => ToolResult::Err(ToolError { reason }),
-        Err(e) => ToolResult::Err(ToolError { reason: e.to_string() }),
+        Err(e) => ToolResult::Err(ToolError {
+            reason: e.to_string(),
+        }),
     }
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::wildcard_enum_match_arm)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
@@ -39,7 +50,15 @@ mod tests {
     async fn read_full_file() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("f.txt"), "line1\nline2\nline3").unwrap();
-        let result = exec(dir.path(), ReadFileInput { path: "f.txt".into(), start_line: None, end_line: None }).await;
+        let result = exec(
+            dir.path(),
+            ReadFileInput {
+                path: "f.txt".into(),
+                start_line: None,
+                end_line: None,
+            },
+        )
+        .await;
         match result {
             ToolResult::Ok(o) => assert_eq!(o.stdout, "line1\nline2\nline3"),
             ToolResult::Err(e) => panic!("{}", e.reason),
@@ -50,7 +69,15 @@ mod tests {
     async fn read_line_range() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("f.txt"), "a\nb\nc\nd").unwrap();
-        let result = exec(dir.path(), ReadFileInput { path: "f.txt".into(), start_line: Some(2), end_line: Some(3) }).await;
+        let result = exec(
+            dir.path(),
+            ReadFileInput {
+                path: "f.txt".into(),
+                start_line: Some(2),
+                end_line: Some(3),
+            },
+        )
+        .await;
         match result {
             ToolResult::Ok(o) => assert_eq!(o.stdout, "b\nc"),
             ToolResult::Err(e) => panic!("{}", e.reason),
