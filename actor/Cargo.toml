@@ -3,6 +3,9 @@ name = "actor"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+file-journal = ["dep:base64"]
+
 [dependencies]
 async-trait  = { workspace = true }
 thiserror    = { workspace = true }
@@ -12,6 +15,10 @@ serde_json   = { workspace = true }
 futures-util = { workspace = true }
 parking_lot  = { workspace = true }
 tracing      = { workspace = true }
+base64       = { version = "0.22", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
 
 [lints]
 workspace = true
