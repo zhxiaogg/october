@@ -33,7 +33,7 @@ async-anthropic   = { git = "https://github.com/zhxiaogg/async-anthropic.git", r
 axum              = { version = "0.7", features = ["macros"] }
 parking_lot       = "0.12"
 tracing           = "0.1"
-reqwest           = { version = "0.12", features = ["json"] }
+reqwest           = { version = "0.13", features = ["json"] }
 tempfile          = "3"
 jsonschema        = "0.20"
 eval              = "0.4"
