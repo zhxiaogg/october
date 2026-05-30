@@ -68,16 +68,20 @@ Because of that, **the default (server/TCP relay) path is not modified at all.**
 The unix-socket transport, the direct connection handler, and the in-process
 executor transport are all additive and live behind the `local` feature.
 
-**The executor core stays transport-agnostic.** "Runtime is a local child" is a
-property of `ProcessRuntimeProvider`, not of the executor. The link type is a
-concern of the provider: `ProcessRuntimeProvider` pairs with a unix-socket
-listener and `UnixSocketRuntimeTransport`; a future container / k8s / remote-VM
-provider would bring its own listener and its own `RuntimeTransport` impl (e.g. a
-TCP/TLS variant). Everything downstream only ever sees `Arc<dyn RuntimeTransport>`,
-so adding a provider does not touch the registry, the executor, the
-`ExecutorClient`, or the CLI. For such a remote provider, `runtime_transport`
-would return a relaying transport (the runtime socket isn't local), exactly as
-server mode does today.
+**Transport mechanism and sandboxing are runtime spawn-arg decisions, not
+provider traits.** `ProcessRuntimeProvider` is itself transport- and
+sandbox-agnostic — it spawns the runtime binary with whatever endpoint and policy
+it was *constructed* with:
+
+- **CLI** constructs it with a **unix-socket endpoint + sandbox-on**.
+- **Server mode / the e2e test** construct it with a **WebSocket(TCP) endpoint +
+  sandbox-off** — unchanged from today.
+
+The runtime selects its behavior purely from its arguments (see *Runtime
+configuration* under the `runtime` crate). A future container / k8s / remote-VM
+provider would bring its own listener + `RuntimeTransport` impl; everything
+downstream only ever sees `Arc<dyn RuntimeTransport>`, so adding a provider does
+not touch the registry, the `ExecutorClient`, or the CLI.
 
 ### Two clients, two transports
 
@@ -106,7 +110,7 @@ What `runtime_transport` returns depends on the `ExecutorTransport` impl
 
 | impl | role |
 |---|---|
-| `UnixSocketRuntimeTransport` (new; was working name `RuntimeConnection`) | direct to a local runtime child over `WebSocketStream<UnixStream>` |
+| `UnixSocketRuntimeTransport` (new) | direct to a local runtime child over `WebSocketStream<UnixStream>` |
 | `ExecutorWsTransport` (exists) | relay through the executor |
 | `MockTransport` (exists) | tests |
 
@@ -126,7 +130,8 @@ Holds the lifecycle client and its transports, so the CLI does not depend on the
 - `ClientError` (moved from `server`).
 - `WsExecutorTransport` (moved from `server`) — its `runtime_transport` returns an
   `ExecutorWsTransport` relay bound to `runtime_id`.
-- `server` re-exports these for source compatibility.
+- `server` is updated to import these from `executor-client` directly — **no
+  re-export shim**.
 
 Dependency direction: `executor-client → runtime-client` (for `RuntimeTransport`),
 `executor-client → models`. The `InMemExecutorTransport` impl lives in the
@@ -160,41 +165,70 @@ feature (off by default)**:
   relay methods are unchanged. Storage is `Arc<dyn RuntimeTransport>` so a future
   provider can register a different transport impl.
 - **`RuntimeListenerServer`** — gains a unix-socket bind (`accept()` yields
-  `WebSocketStream<UnixStream>`), used by `ProcessRuntimeProvider` under `local`.
-- **`ProcessRuntimeProvider`** — under `local`, spawns the child with
-  `--executor-socket <path>` instead of `--executor-url ws://...`. **TODO
-  (tracked):** spawn the child with `Command::env_clear()` + a safe allowlist
-  (`PATH`, `HOME`, locale) so the API key cannot leak via
-  `bash -c 'echo $ANTHROPIC_API_KEY'`.
+  `WebSocketStream<UnixStream>`), used when the listener is configured for unix.
+
+`ProcessRuntimeProvider` itself is **transport- and sandbox-agnostic** and is not
+tied to `local`. It gains construction-time options for (a) the runtime endpoint
+to pass (`--executor-url ws://…` vs `--executor-socket <path>`) and (b) an
+optional sandbox policy (`--sandbox` + `--sandbox-read <path>` flags). The caller
+chooses: CLI → unix + sandbox-on; server/e2e → WebSocket + sandbox-off (today's
+behavior). **TODO (tracked):** when sandbox-on, spawn the child with
+`Command::env_clear()` + a safe allowlist (`PATH`, `HOME`, locale) so the API key
+cannot leak via `bash -c 'echo $ANTHROPIC_API_KEY'`.
 
 `do_tool_call` is **not** modified — it is simply never reached in CLI mode.
 
 ### `actor` crate: `FileJournal`
 
-Implements the existing opaque-bytes `Journal` trait:
+Implements the existing opaque-bytes `Journal` trait. Constructed with a **root
+dir** (from config, see *Config*); writes `<root>/runs/<persistence_id>/journal.jsonl`.
 
-- per `persistence_id`: an append-only `journal.jsonl` (one JSON-encoded event per
-  line) + a `snapshot.json`, under the run directory (outside the workdir).
-- `persist` appends; `replay(after_seq)` streams lines after a sequence;
-  `save_snapshot` / `latest_snapshot` read/write the snapshot file;
-  `delete_events_before`, `copy_snapshot`, `clear` as specified by the trait.
-- Recovery uses `spawn_root`'s existing snapshot-plus-events replay.
+**Snapshots are no-op** (per design): runs are short, so we trade snapshotting for
+always full-replaying the event log. Concretely:
+
+- `persist(id, events)` — append each event to `journal.jsonl`, one record per
+  line. Bytes are opaque, so each record is base64-encoded to keep the file
+  strictly line-delimited regardless of content. Sequence numbers are implicit
+  (1-based line position); the file is the only state.
+- `replay(id, after_seq)` — stream records whose line index `> after_seq`, in
+  order, base64-decoded back to `Vec<u8>`.
+- `save_snapshot` / `copy_snapshot` / `delete_events_before` — **no-op**
+  (`Ok(())`, nothing written). `latest_snapshot` — returns `Ok(None)`, so
+  `spawn_root`'s recovery starts from `initial_state` and replays the full log
+  (`after_seq = 0`) every time.
+- `clear(id)` — remove the run's `journal.jsonl` (test helper).
+
+Consequence: recovery is always a full replay from event 0. Acceptable for CLI run
+lengths. (Fork — which relies on `copy_snapshot` — is not a CLI feature, so the
+no-op is fine.)
 
 ### `runtime` crate (the sandboxed child)
 
-- `october-runtime/src/main.rs`: after parsing `--working-dir` / `--executor-socket`,
-  build a `nono::CapabilitySet` and call `Sandbox::apply()` **before** connecting
-  or running any tool. **Fail-closed**: if `Sandbox::support_info().is_supported`
-  is false or `apply()` errors, exit non-zero before connecting (the orchestrator
-  surfaces this as a clear sandbox error). Capabilities:
+**Runtime configuration — how the runtime knows its transport and whether to
+sandbox.** Everything is driven by spawn args (set by `ProcessRuntimeProvider`):
+
+- **Transport:** `--executor-url ws://<host:port>` → WebSocket/TCP; or
+  `--executor-socket <path>` → unix socket. Exactly one is given; the runtime
+  picks its transport accordingly.
+- **Sandbox:** `--sandbox` requests confinement; absent → no nono (today's
+  behavior). When `--sandbox` is given, capabilities are built from:
   - system paths (RO) — per-platform set required by the toolchain,
-  - `working_dir` (ReadWrite),
+  - `--working-dir` (ReadWrite),
   - the executor unix socket path (`UnixSocketCapability`, connect only),
-  - any `sandbox.extra_read_paths` from config, passed through as args.
-- Connect to the unix socket and run the existing WS tool loop unchanged. `bash`
-  and file tools need no change — confinement is inherited by child processes.
-- `--dangerously-disable-sandbox` (off by default) skips `apply()` for debugging
-  / unsupported platforms; prints a loud warning.
+  - each `--sandbox-read <path>` (RO) — from the CLI config's `sandbox.extra_read_paths`.
+
+Sequence in `main.rs`: parse args → if `--sandbox`, build the `CapabilitySet` and
+call `Sandbox::apply()` **before** connecting or running any tool. **Fail-closed:**
+if `Sandbox::support_info().is_supported` is false or `apply()` errors, exit
+non-zero before connecting — there is **no bypass flag**; an unsupported platform
+or a failed apply is a hard failure (the orchestrator surfaces it as a clear
+sandbox error). Then connect on the chosen transport and run the existing tool
+loop unchanged — `bash` and file tools need no change; confinement is inherited by
+child processes.
+
+The `--sandbox`/nono code path is behind the `runtime` crate's `sandbox` feature
+(default on); a build without the feature has no `--sandbox` support and no `nono`
+dependency, for unit tests and unsupported-platform development.
 
 ### New crate: `cli` (binary `october`)
 
@@ -229,11 +263,12 @@ Notes:
   implements it by returning a relay transport; only the `InMemExecutorTransport`
   impl (which returns a *direct* `UnixSocketRuntimeTransport`) is behind
   `executor/local`.
-- `runtime`'s `sandbox` feature is on by default (the shipped binary is always
-  sandboxed); it can be disabled for unit tests or unsupported-platform dev — the
-  compile-time counterpart to the run-time `--dangerously-disable-sandbox` flag.
-  The runtime accepts both `--executor-url` (TCP) and `--executor-socket` (unix)
-  regardless; the CLI chooses unix.
+- `runtime`'s `sandbox` feature is on by default (the shipped binary supports
+  `--sandbox`); it can be compiled out for unit tests or unsupported-platform dev,
+  in which case `--sandbox` is unavailable and there is no `nono` dependency. There
+  is **no run-time bypass flag** — when `--sandbox` is requested, an unsupported
+  platform or failed apply is a hard failure. The runtime accepts both
+  `--executor-url` (TCP) and `--executor-socket` (unix); the CLI chooses unix.
 - The `cli` crate enables: `actor/file-journal`, `executor/local`, and
   builds/locates the `october-runtime` binary with `sandbox` on. It can disable
   `executor-client/ws` for a pure-local build.
@@ -260,10 +295,16 @@ Notes:
   },
   "sandbox": {
     "extra_read_paths": []
+  },
+  "storage": {
+    "root_dir": "./.october"
   }
 }
 ```
 
+- `storage.root_dir` is the CLI's working root for run state: per-run data lives
+  under `<root_dir>/runs/<run_id>/` (`journal.jsonl`, `manifest.json`). It is
+  outside any agent `--workdir`. An optional `--state-dir` flag overrides it.
 - A `WorkflowAgentDef.model` is a **model key** (e.g. `"sonnet"`) →
   `models.sonnet` → `providers.anthropic`.
 - The CLI config is **CLI-owned policy**, hand-written serde in the `cli` crate —
@@ -288,21 +329,21 @@ Structural + semantic checks; reports **all** errors; non-zero exit on any:
 - every `agent.model` ∈ config `models`.
 - every referenced `model.provider` ∈ config `providers`.
 
-### `october run --workflow x.json --config october.json --workdir DIR --input STR [--state-dir DIR] [--dangerously-disable-sandbox]`
+### `october run --workflow x.json --config october.json --workdir DIR --input STR [--state-dir DIR]`
 
 1. Run `validate`; abort on error.
 2. Build `provider_registry`.
-3. Start in-process `Executor` (ProcessRuntimeProvider + unix `RuntimeListenerServer`
-   + shared `ConnectedRuntimeRegistry`).
+3. Start in-process `Executor` (`ProcessRuntimeProvider` configured for unix +
+   sandbox-on, unix `RuntimeListenerServer`, shared `ConnectedRuntimeRegistry`).
 4. `ExecutorClient(InMemExecutorTransport).create_runtime(run_id, RuntimeConfig { working_dir })`
    → spawns the nono-sandboxed child.
 5. `executor_client.runtime_transport(run_id)` → `RuntimeClient::from_arc(..)`.
 6. Build `WorkflowRuntimeContext { provider_registry, runtime_client, TerminalSink, DefaultToolboxFactory }`;
-   `spawn_root(WorkflowActor::new(run_id, def, ctx), FileJournal)`; send `Start { input }`.
+   `spawn_root(WorkflowActor::new(run_id, def, ctx), FileJournal(root_dir))`; send `Start { input }`.
 7. Stream `AgentEvent`s to the terminal. On `AwaitingUserInput`: print the question
    + `run_id`, persist, `destroy_runtime`, exit with a distinct status. On
    finish/fail: `destroy_runtime`, exit with status.
-8. Persist `./.october/runs/<run_id>/{journal.jsonl, snapshot.json, manifest.json}`.
+8. Per-run state at `<root_dir>/runs/<run_id>/{journal.jsonl, manifest.json}`.
    `manifest.json` = resolved workflow def + workdir (**no secrets**).
 
 ### `october resume --run <run_id> --config october.json [--state-dir DIR] [--message STR]`
@@ -320,8 +361,7 @@ Structural + semantic checks; reports **all** errors; non-zero exit on any:
 
 - **Sandbox unavailable / apply failure** → runtime child exits non-zero before
   connecting; `create_runtime` times out / fails; CLI reports a clear sandbox
-  error and exits. Fail-closed; never run tools unconfined (unless
-  `--dangerously-disable-sandbox`).
+  error and exits. Fail-closed; never runs tools unconfined — there is no bypass.
 - **Validation failure** → all errors printed, non-zero exit, nothing spawned.
 - **Provider/credential errors** (missing `api_key_env`) → fail during registry
   build, before spawning the runtime.
@@ -362,13 +402,13 @@ executor/                          DEFAULT PATH UNTOUCHED (TCP relay handler, do
                                    direct connection handler, registry transport store/retrieve,
                                    InMemExecutorTransport, ProcessRuntimeProvider --executor-socket
                                    + env scrub TODO
-runtime/                           + nono Sandbox::apply in main [feat sandbox], fail-closed,
-                                   accepts --executor-socket and --executor-url,
-                                   --dangerously-disable-sandbox
-actor/                             + FileJournal [feat file-journal]
+runtime/                           [feat sandbox]: nono dep + Sandbox::apply in main + --sandbox
+                                   /--sandbox-read flags, fail-closed (no bypass);
+                                   always accepts --executor-socket and --executor-url
+actor/                             + FileJournal [feat file-journal]; no-op snapshots
 runtime-client/                    + RuntimeClient::from_arc; ExecutorWsTransport gains a
                                    runtime_transport-returns-relay constructor (additive)
-server/                            re-export executor-client (no behavior change)
+server/                            imports ExecutorClient/etc from executor-client (no re-export)
 ```
 
 Dependency direction (acyclic): `executor-client → runtime-client`;
