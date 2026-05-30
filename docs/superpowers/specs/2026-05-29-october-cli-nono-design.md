@@ -53,13 +53,26 @@ Two communication seams:
 
 - **orchestrator ↔ executor** — in-memory channels (`InMemExecutorTransport`).
   Carries `ExecutorCommand` / `ExecutorEvent`. Used for runtime *lifecycle*.
-- **executor ↔ runtime child** — unix socket (was TCP). Carries the runtime
-  protocol (`RuntimeInboundMessage` / `RuntimeOutboundMessage`).
+- **executor ↔ runtime child** — for `ProcessRuntimeProvider`, a unix socket
+  (was TCP). Carries the runtime protocol (`RuntimeInboundMessage` /
+  `RuntimeOutboundMessage`).
 
-The orchestrator's **tool calls bypass the executor**: the runtime is a local
-child, so the orchestrator talks to it directly over the unix socket via
+The orchestrator's **tool calls bypass the executor** *when the runtime is
+reachable directly*. With `ProcessRuntimeProvider` the runtime is a local child,
+so the orchestrator talks to it directly over the unix socket via
 `UnixSocketRuntimeTransport`. The executor is responsible only for lifecycle
 (spawn / health / restart / destroy).
+
+**The executor core stays transport-agnostic.** "Runtime is a local child" is a
+property of `ProcessRuntimeProvider`, not of the executor. The link type is a
+concern of the provider: `ProcessRuntimeProvider` pairs with a unix-socket
+listener and `UnixSocketRuntimeTransport`; a future container / k8s / remote-VM
+provider would bring its own listener and its own `RuntimeTransport` impl (e.g. a
+TCP/TLS variant). Everything downstream only ever sees `Arc<dyn RuntimeTransport>`,
+so adding a provider does not touch the registry, the executor, the
+`ExecutorClient`, or the CLI. For such a remote provider, `runtime_transport`
+would return a relaying transport (the runtime socket isn't local), exactly as
+server mode does today.
 
 ### Two clients, two transports
 
@@ -124,17 +137,21 @@ Dependency direction: `executor-client → runtime-client` (for `RuntimeTranspor
     await `RuntimeOutboundMessage::ToolCallResponse` correlated by `call_id`.
   - `cancel(call_id)` → send `CancelCallRequest`.
   - A spawned reader task fills the pending map; supports concurrent in-flight calls.
-- **`ConnectedRuntimeRegistry`** — stores `Arc<UnixSocketRuntimeTransport>` per
-  runtime (instead of today's write-only `RuntimeSink`). Adds
-  `runtime_transport(runtime_id) -> Option<Arc<dyn RuntimeTransport>>`.
-- **`handle_runtime_connection`** — builds a `UnixSocketRuntimeTransport` from the
-  accepted connection and registers it (replaces inline response→`ExecutorEvent`
-  translation).
+  - The send-then-correlate read loop is a private generic helper
+    (`ws_request_response<S>`), so a future TCP/remote provider can reuse it for a
+    `TcpRuntimeTransport` without duplicating correlation logic.
+- **`ConnectedRuntimeRegistry`** — stores `Arc<dyn RuntimeTransport>` per runtime
+  (instead of today's write-only `RuntimeSink`), keeping it open to any provider's
+  transport impl. Adds `runtime_transport(runtime_id) -> Option<Arc<dyn RuntimeTransport>>`.
+- **`handle_runtime_connection`** — for the process-provider listener, builds a
+  `UnixSocketRuntimeTransport` from the accepted connection and registers it as
+  `Arc<dyn RuntimeTransport>` (replaces inline response→`ExecutorEvent` translation).
 - **`do_tool_call`** (server mode) — becomes `transport.invoke(call)` then wrap the
   result as `ExecutorEvent::ToolResult`. Net simplification: executor stops
-  hand-rolling response correlation.
-- **`RuntimeListenerServer`** — binds a `UnixListener`; `accept()` yields
-  `WebSocketStream<UnixStream>`.
+  hand-rolling response correlation, and this path is now transport-agnostic.
+- **`RuntimeListenerServer`** — gains a unix-socket bind used by
+  `ProcessRuntimeProvider`; `accept()` yields `WebSocketStream<UnixStream>`. (A
+  remote provider would supply a different listener; not built in this pass.)
 - **`ProcessRuntimeProvider`** — spawns the child with `--executor-socket <path>`
   (was `--executor-url ws://...`). **TODO (tracked):** spawn the child with
   `Command::env_clear()` + a safe allowlist (`PATH`, `HOME`, locale) so the API
@@ -175,6 +192,36 @@ Implements the existing opaque-bytes `Journal` trait:
   run complete) to stdout/stderr.
 
 ---
+
+## Cargo features
+
+CLI/local-only additions are gated behind crate features so a server/distributed
+build compiles none of them (and avoids their deps), and the `cli` crate opts in
+to exactly what it needs. Core types and the server path are always available.
+
+| Crate | Feature | Gates | Default |
+|---|---|---|---|
+| `actor` | `file-journal` | `FileJournal` (filesystem-backed `Journal`) | off |
+| `executor` | `in-process` | `InMemExecutorTransport` + the in-process dispatch entry point it drives | off |
+| `executor-client` | `ws` | `WsExecutorTransport` (pulls `tokio-tungstenite`) | on |
+| `runtime` (binary) | `sandbox` | `nono` dep + `Sandbox::apply` in `main` | on |
+
+Notes:
+
+- `UnixSocketRuntimeTransport`, the unix-socket listener, the registry change, and
+  the `do_tool_call` refactor are **shared** by server and CLI (the process
+  provider uses them in both), so they are *not* feature-gated.
+- The `runtime_transport` accessor on `ExecutorTransport`/`ExecutorClient` is part
+  of the always-on trait; only the `InMemExecutorTransport` impl that returns a
+  *direct* transport is behind `executor/in-process`.
+- `runtime`'s `sandbox` feature is on by default (the shipped binary is always
+  sandboxed); it can be disabled for unit tests or unsupported-platform dev. This
+  is the compile-time counterpart to the runtime `--dangerously-disable-sandbox`
+  flag, which is a run-time escape hatch.
+- The `cli` crate enables: `actor/file-journal`, `executor/in-process`,
+  `executor-client` (default `ws` is harmless but can be turned off for a
+  pure-local build), and builds/locates the `october-runtime` binary with
+  `sandbox` on.
 
 ## Config (JSON)
 
@@ -292,16 +339,24 @@ Structural + semantic checks; reports **all** errors; non-zero exit on any:
 
 ```
 cli/                         NEW   binary `october`; subcommands, config, TerminalSink
-executor-client/             NEW   ExecutorTransport trait, ExecutorClient, ClientError,
-                                   WsExecutorTransport (moved from server)
-executor/                          + UnixSocketRuntimeTransport, InMemExecutorTransport,
-                                   unix-socket listener, registry + do_tool_call refactor,
-                                   ProcessRuntimeProvider --executor-socket + env scrub TODO
-runtime/                           + nono Sandbox::apply in main, fail-closed, --executor-socket
-actor/                             + FileJournal
+                                   enables actor/file-journal + executor/in-process
+executor-client/             NEW   ExecutorTransport trait (+ runtime_transport), ExecutorClient,
+                                   ClientError, WsExecutorTransport [feat ws] (moved from server)
+executor/                          + UnixSocketRuntimeTransport (shared), unix-socket listener
+                                   (shared), registry holds Arc<dyn RuntimeTransport>,
+                                   do_tool_call via transport.invoke (shared),
+                                   ProcessRuntimeProvider --executor-socket + env scrub TODO,
+                                   InMemExecutorTransport [feat in-process]
+runtime/                           + nono Sandbox::apply in main [feat sandbox], fail-closed,
+                                   --executor-socket, --dangerously-disable-sandbox
+actor/                             + FileJournal [feat file-journal]
 runtime-client/                    + RuntimeClient::from_arc
 server/                            re-export executor-client; do_tool_call via transport.invoke
 ```
+
+Dependency direction (acyclic): `executor-client → runtime-client`;
+`executor → executor-client + runtime-client`; `server → executor-client`;
+`cli → cli-enabled executor + executor-client + runtime-client + workflow + actor + providers + models`.
 
 ---
 
