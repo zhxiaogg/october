@@ -8,7 +8,8 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(
     name = "october",
-    about = "Run agent workflows in a nono-sandboxed runtime"
+    about = "Run agent workflows in a nono-sandboxed runtime",
+    long_about = "October runs multi-agent agentic workflows in a nono-sandboxed runtime."
 )]
 struct Cli {
     #[command(subcommand)]
