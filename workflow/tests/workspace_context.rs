@@ -1,0 +1,77 @@
+//! Integration test for workspace context: scan over a `RuntimeClient` (backed by a
+//! `MockTransport` returning a `WorkspaceScan`), then prompt composition and the
+//! `DefaultToolboxFactory` skill tool — the real seam used by `spawn_agent`, without
+//! standing up the full actor/journal.
+
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
+
+use models::runtime::{ScannedFile, WorkspaceScan};
+use models::workflow::WorkflowAgentDef;
+use runtime_client::{MockTransport, RuntimeClient};
+use workflow::{DefaultToolboxFactory, ToolboxFactory, compose_system_prompt, scan_workspace};
+
+fn agent_def() -> WorkflowAgentDef {
+    WorkflowAgentDef {
+        name: "coder".into(),
+        system_prompt: Some("You are a coder.".into()),
+        model: "m".into(),
+        output_schema: None,
+        allow_ask_user: false,
+        transitions: None,
+        max_iterations: None,
+        max_retries: None,
+        allowed_tools: Some(vec!["bash".into()]),
+    }
+}
+
+fn scan_payload() -> WorkspaceScan {
+    WorkspaceScan {
+        instructions: Some(ScannedFile {
+            path: "AGENTS.md".into(),
+            content: "Project rules.".into(),
+        }),
+        skills: vec![ScannedFile {
+            path: ".claude/skills/git-bisect/SKILL.md".into(),
+            content: "---\nname: git-bisect\ndescription: Find the bad commit\n---\nRun git bisect."
+                .into(),
+        }],
+    }
+}
+
+#[tokio::test]
+async fn scan_composes_prompt_and_exposes_skill_tool() {
+    let client = RuntimeClient::new(MockTransport::ok("").with_scan(scan_payload()));
+    let ws = scan_workspace(&client).await;
+
+    // Prompt: role first, then workspace context, then the skill listing.
+    let prompt = compose_system_prompt(agent_def().system_prompt.as_deref(), &ws).unwrap();
+    assert!(prompt.contains("You are a coder."));
+    assert!(prompt.contains("# Workspace context\nProject rules."));
+    assert!(prompt.contains("- git-bisect: Find the bad commit"));
+
+    // Toolbox: skill tool present (even though allowed_tools is just ["bash"]) and serves the body.
+    let tb = DefaultToolboxFactory.for_agent(&agent_def(), client, ws.skills.clone());
+    let names: Vec<String> = tb.specs().into_iter().map(|s| s.name).collect();
+    assert!(names.contains(&"bash".to_string()));
+    assert!(names.contains(&"skill".to_string()));
+    let body = tb
+        .execute("skill", serde_json::json!({ "name": "git-bisect" }))
+        .await
+        .unwrap();
+    assert_eq!(body, serde_json::json!("Run git bisect."));
+}
+
+#[tokio::test]
+async fn empty_workspace_yields_plain_prompt_and_no_skill_tool() {
+    let client = RuntimeClient::new(MockTransport::ok("")); // default empty scan
+    let ws = scan_workspace(&client).await;
+    let prompt = compose_system_prompt(agent_def().system_prompt.as_deref(), &ws);
+    assert_eq!(prompt.as_deref(), Some("You are a coder."));
+    let tb = DefaultToolboxFactory.for_agent(&agent_def(), client, ws.skills.clone());
+    assert!(!tb.specs().iter().any(|s| s.name == "skill"));
+}
