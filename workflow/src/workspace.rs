@@ -59,7 +59,10 @@ pub async fn scan(client: &RuntimeClient) -> WorkspaceContext {
         .iter()
         .map(|s| s.to_string())
         .collect();
-    match client.scan_workspace(candidates, SKILLS_GLOB.to_string()).await {
+    match client
+        .scan_workspace(candidates, SKILLS_GLOB.to_string())
+        .await
+    {
         Ok(raw) => interpret(raw),
         Err(e) => {
             tracing::warn!(error = %e, "workspace scan failed; continuing without it");
@@ -119,7 +122,9 @@ fn parse_skill(file: &ScannedFile) -> Option<Skill> {
 /// Split `---\n<frontmatter>\n---\n<body>`; returns `(frontmatter, body)`.
 fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
     let rest = content.strip_prefix("---")?;
-    let rest = rest.strip_prefix('\n').or_else(|| rest.strip_prefix("\r\n"))?;
+    let rest = rest
+        .strip_prefix('\n')
+        .or_else(|| rest.strip_prefix("\r\n"))?;
     // Find a closing fence line (`---`, ignoring trailing CR/whitespace).
     let mut idx = 0;
     for line in rest.split_inclusive('\n') {
@@ -151,15 +156,15 @@ fn unquote(s: &str) -> &str {
 /// omitted when empty; returns `None` if nothing at all would be emitted.
 pub fn compose_system_prompt(agent_prompt: Option<&str>, ws: &WorkspaceContext) -> Option<String> {
     let mut sections: Vec<String> = Vec::new();
-    if let Some(p) = agent_prompt {
-        if !p.trim().is_empty() {
-            sections.push(p.trim().to_string());
-        }
+    if let Some(p) = agent_prompt
+        && !p.trim().is_empty()
+    {
+        sections.push(p.trim().to_string());
     }
-    if let Some(instr) = &ws.instructions {
-        if !instr.trim().is_empty() {
-            sections.push(format!("# Workspace context\n{}", instr.trim()));
-        }
+    if let Some(instr) = &ws.instructions
+        && !instr.trim().is_empty()
+    {
+        sections.push(format!("# Workspace context\n{}", instr.trim()));
     }
     if !ws.skills.is_empty() {
         let mut block = String::from(
@@ -238,9 +243,15 @@ mod tests {
         let raw = WorkspaceScan {
             instructions: Some(file("AGENTS.md", "proj")),
             skills: vec![
-                file("a/SKILL.md", "---\nname: a\ndescription: first\n---\nbody-a"),
+                file(
+                    "a/SKILL.md",
+                    "---\nname: a\ndescription: first\n---\nbody-a",
+                ),
                 file("b/SKILL.md", "no frontmatter"),
-                file("c/SKILL.md", "---\nname: a\ndescription: dup\n---\nbody-dup"),
+                file(
+                    "c/SKILL.md",
+                    "---\nname: a\ndescription: dup\n---\nbody-dup",
+                ),
             ],
         };
         let ctx = interpret(raw);

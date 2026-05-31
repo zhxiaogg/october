@@ -147,7 +147,10 @@ where
         skills_glob: String,
     ) -> Result<WorkspaceScan, TransportError> {
         let (tx, rx) = oneshot::channel();
-        self.pending_scan.lock().await.insert(call_id.to_string(), tx);
+        self.pending_scan
+            .lock()
+            .await
+            .insert(call_id.to_string(), tx);
 
         let msg = RuntimeInboundMessage::ScanWorkspace(ScanRequest {
             call_id: call_id.to_string(),
@@ -211,16 +214,17 @@ mod tests {
                             .await;
                     }
                     Ok(RuntimeInboundMessage::ScanWorkspace(req)) => {
-                        let resp = RuntimeOutboundMessage::ScanResult(models::runtime::ScanResponse {
-                            call_id: req.call_id,
-                            scan: models::runtime::WorkspaceScan {
-                                instructions: Some(models::runtime::ScannedFile {
-                                    path: "AGENTS.md".into(),
-                                    content: "ctx".into(),
-                                }),
-                                skills: vec![],
-                            },
-                        });
+                        let resp =
+                            RuntimeOutboundMessage::ScanResult(models::runtime::ScanResponse {
+                                call_id: req.call_id,
+                                scan: models::runtime::WorkspaceScan {
+                                    instructions: Some(models::runtime::ScannedFile {
+                                        path: "AGENTS.md".into(),
+                                        content: "ctx".into(),
+                                    }),
+                                    skills: vec![],
+                                },
+                            });
                         let _ = sink
                             .send(Message::Text(serde_json::to_string(&resp).unwrap().into()))
                             .await;

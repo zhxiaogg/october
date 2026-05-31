@@ -37,8 +37,9 @@ fn scan_payload() -> WorkspaceScan {
         }),
         skills: vec![ScannedFile {
             path: ".claude/skills/git-bisect/SKILL.md".into(),
-            content: "---\nname: git-bisect\ndescription: Find the bad commit\n---\nRun git bisect."
-                .into(),
+            content:
+                "---\nname: git-bisect\ndescription: Find the bad commit\n---\nRun git bisect."
+                    .into(),
         }],
     }
 }

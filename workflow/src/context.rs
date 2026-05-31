@@ -199,7 +199,10 @@ impl Toolbox for AgentToolbox {
             ));
         }
         if name == SKILL_TOOL {
-            let requested = input.get("name").and_then(Value::as_str).unwrap_or_default();
+            let requested = input
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             return match self.skills.get(requested) {
                 Some(skill) => Ok(Value::String(skill.body.clone())),
                 None => Err(ToolCallError::InvalidInput(format!(
