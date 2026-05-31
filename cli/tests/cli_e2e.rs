@@ -176,6 +176,21 @@ fn workflow_run_id(state: &Path) -> String {
     panic!("no run dir with a manifest under {}", runs.display());
 }
 
+/// Find the built `october` binary: sibling of the test exe's profile dir →
+/// adjacent to the test exe.
+fn locate_october_bin() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?; // .../target/<profile>/deps
+    if let Some(profile) = dir.parent() {
+        let cand = profile.join("october");
+        if cand.exists() {
+            return Some(cand);
+        }
+    }
+    let cand = dir.join("october");
+    cand.exists().then_some(cand)
+}
+
 // ── harness unit tests ─────────────────────────────────────────────────────
 
 #[test]
@@ -191,6 +206,29 @@ fn classify_probe_maps_runtime_exit_codes() {
 }
 
 // ── tests ──────────────────────────────────────────────────────────────────
+
+#[test]
+fn version_flag_prints_version() {
+    let Some(bin) = locate_october_bin() else {
+        eprintln!("skipping version_flag_prints_version: october binary not found");
+        return;
+    };
+    let output = std::process::Command::new(&bin)
+        .arg("--version")
+        .output()
+        .expect("failed to spawn october --version");
+    assert!(
+        output.status.success(),
+        "october --version exited with code {:?}",
+        output.status.code()
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let expected = env!("CARGO_PKG_VERSION");
+    assert!(
+        stdout.contains(expected),
+        "expected stdout to contain version {expected}, got: {stdout}"
+    );
+}
 
 #[tokio::test]
 async fn run_orchestration_finishes() {
