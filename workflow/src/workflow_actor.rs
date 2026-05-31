@@ -163,10 +163,11 @@ impl WorkflowActor {
             .rt
             .provider_for(&agent_def.model)
             .ok_or_else(|| format!("no provider registered for model '{}'", agent_def.model))?;
-        let toolbox = self
-            .rt
-            .toolbox_factory
-            .for_agent(agent_def, self.rt.runtime_client.clone());
+        let toolbox = self.rt.toolbox_factory.for_agent(
+            agent_def,
+            self.rt.runtime_client.clone(),
+            std::sync::Arc::new(crate::workspace::SkillSet::default()),
+        );
         let agent_ctx = AgentRuntimeContext {
             provider,
             toolbox,

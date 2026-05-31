@@ -14,7 +14,7 @@ mod workspace;
 
 pub use agent_actor::{AgentActor, AgentCommand, AgentDomainEvent, AgentParams, AgentState};
 pub use context::{
-    AgentRuntimeContext, CONCLUDE_TOOL, DefaultToolboxFactory, ToolboxFactory,
+    AgentRuntimeContext, CONCLUDE_TOOL, DefaultToolboxFactory, SKILL_TOOL, ToolboxFactory,
     WorkflowRuntimeContext, conclude_tool_spec,
 };
 pub use workflow_actor::{
