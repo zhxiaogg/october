@@ -1,4 +1,5 @@
 use crate::workflow_actor::{WorkflowCommand, WorkflowNotification};
+use crate::workspace::SkillSet;
 use actor::ActorRef;
 use agentcore::{EventSink, LlmProvider, ToolCallError, ToolSpec, Toolbox, ToolboxImpl};
 use async_trait::async_trait;
@@ -12,6 +13,10 @@ use uuid::Uuid;
 /// Name of the builtin terminal tool an agent calls to finish its turn — either
 /// delivering its structured output or asking the user a question.
 pub const CONCLUDE_TOOL: &str = "conclude";
+
+/// Name of the builtin tool an agent calls to load a skill's full instructions on
+/// demand (progressive disclosure). Advertised only when skills are available.
+pub const SKILL_TOOL: &str = "skill";
 
 /// Resources injected into a [`WorkflowActor`](crate::WorkflowActor) at construction.
 ///
@@ -59,6 +64,7 @@ pub trait ToolboxFactory: Send + Sync + 'static {
         &self,
         agent_def: &WorkflowAgentDef,
         runtime_client: RuntimeClient,
+        skills: Arc<SkillSet>,
     ) -> Arc<dyn Toolbox>;
 }
 
@@ -71,6 +77,7 @@ impl ToolboxFactory for DefaultToolboxFactory {
         &self,
         agent_def: &WorkflowAgentDef,
         runtime_client: RuntimeClient,
+        skills: Arc<SkillSet>,
     ) -> Arc<dyn Toolbox> {
         let runtime = add_runtime_tools(ToolboxImpl::new(), runtime_client);
         let base: Arc<dyn Toolbox> = match &agent_def.allowed_tools {
@@ -82,7 +89,11 @@ impl ToolboxFactory for DefaultToolboxFactory {
         };
         let conclude =
             conclude_tool_spec(agent_def.output_schema.as_ref(), agent_def.allow_ask_user);
-        Arc::new(AgentToolbox { base, conclude })
+        Arc::new(AgentToolbox {
+            base,
+            conclude,
+            skills,
+        })
     }
 }
 
@@ -144,11 +155,14 @@ fn both_schema(output_schema: &Value) -> Value {
     })
 }
 
-/// A toolbox = a base (permitted runtime tools) plus the optional `conclude` tool,
-/// which is advertised but never executed (the agent loop intercepts it).
+/// A toolbox = a base (permitted runtime tools) plus the optional `conclude` tool
+/// (advertised but never executed — the agent loop intercepts it) and, when the
+/// workspace has skills, a `skill` tool that serves a skill's body on demand. The
+/// `conclude` and `skill` tools are layered on top of the allowlist, like builtins.
 struct AgentToolbox {
     base: Arc<dyn Toolbox>,
     conclude: Option<ToolSpec>,
+    skills: Arc<SkillSet>,
 }
 
 #[async_trait]
@@ -157,6 +171,21 @@ impl Toolbox for AgentToolbox {
         let mut specs = self.base.specs();
         if let Some(c) = &self.conclude {
             specs.push(c.clone());
+        }
+        if !self.skills.is_empty() {
+            specs.push(ToolSpec {
+                name: SKILL_TOOL.to_string(),
+                description:
+                    "Load the full instructions for a named skill listed under 'Available skills'."
+                        .to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["name"],
+                    "properties": {
+                        "name": { "type": "string", "description": "The skill name." }
+                    }
+                }),
+            });
         }
         specs
     }
@@ -168,6 +197,19 @@ impl Toolbox for AgentToolbox {
             return Err(ToolCallError::ExecutionFailed(
                 "the conclude tool is terminal and is not executed".to_string(),
             ));
+        }
+        if name == SKILL_TOOL {
+            let requested = input
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            return match self.skills.get(requested) {
+                Some(skill) => Ok(Value::String(skill.body.clone())),
+                None => Err(ToolCallError::InvalidInput(format!(
+                    "unknown skill '{requested}'; available: {}",
+                    self.skills.names().join(", ")
+                ))),
+            };
         }
         self.base.execute(name, input).await
     }
@@ -259,8 +301,11 @@ mod tests {
     fn toolbox_includes_conclude_and_filters_runtime_tools() {
         let client = RuntimeClient::new(MockTransport::ok(""));
         let out = json!({"type": "object"});
-        let tb = DefaultToolboxFactory
-            .for_agent(&def(Some(vec!["bash".into()]), Some(out), false), client);
+        let tb = DefaultToolboxFactory.for_agent(
+            &def(Some(vec!["bash".into()]), Some(out), false),
+            client,
+            Arc::new(SkillSet::default()),
+        );
         let names: Vec<String> = tb.specs().into_iter().map(|s| s.name).collect();
         assert!(names.contains(&"bash".to_string()));
         assert!(names.contains(&CONCLUDE_TOOL.to_string()));
@@ -271,8 +316,46 @@ mod tests {
     async fn conclude_tool_is_not_executable() {
         let client = RuntimeClient::new(MockTransport::ok(""));
         let out = json!({"type": "object"});
-        let tb = DefaultToolboxFactory.for_agent(&def(None, Some(out), false), client);
+        let tb = DefaultToolboxFactory.for_agent(
+            &def(None, Some(out), false),
+            client,
+            Arc::new(SkillSet::default()),
+        );
         let err = tb.execute(CONCLUDE_TOOL, json!({})).await.unwrap_err();
         assert!(matches!(err, ToolCallError::ExecutionFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn skill_tool_advertised_and_serves_body() {
+        use crate::workspace::Skill;
+        let client = RuntimeClient::new(MockTransport::ok(""));
+        let skills = Arc::new(SkillSet::from_iter([Skill {
+            name: "git-bisect".into(),
+            description: "find bad commit".into(),
+            body: "Step 1...".into(),
+        }]));
+        let tb = DefaultToolboxFactory.for_agent(&def(None, None, false), client, skills);
+        assert!(tb.specs().iter().any(|s| s.name == SKILL_TOOL));
+        let out = tb
+            .execute(SKILL_TOOL, json!({ "name": "git-bisect" }))
+            .await
+            .unwrap();
+        assert_eq!(out, json!("Step 1..."));
+        let err = tb
+            .execute(SKILL_TOOL, json!({ "name": "nope" }))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolCallError::InvalidInput(_)));
+    }
+
+    #[tokio::test]
+    async fn no_skill_tool_when_empty() {
+        let client = RuntimeClient::new(MockTransport::ok(""));
+        let tb = DefaultToolboxFactory.for_agent(
+            &def(None, None, false),
+            client,
+            Arc::new(SkillSet::default()),
+        );
+        assert!(!tb.specs().iter().any(|s| s.name == SKILL_TOOL));
     }
 }

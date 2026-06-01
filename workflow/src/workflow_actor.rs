@@ -160,7 +160,7 @@ impl WorkflowActor {
         self.def.agents.iter().find(|a| a.name == name)
     }
 
-    fn spawn_agent(
+    async fn spawn_agent(
         &self,
         ctx: &ActorContext<Self>,
         agent_def: &WorkflowAgentDef,
@@ -170,10 +170,14 @@ impl WorkflowActor {
             .rt
             .provider_for(&agent_def.model)
             .ok_or_else(|| format!("no provider registered for model '{}'", agent_def.model))?;
-        let toolbox = self
-            .rt
-            .toolbox_factory
-            .for_agent(agent_def, self.rt.runtime_client.clone());
+        // Re-scan the workspace on every spawn so a mid-run `git pull` or an earlier
+        // agent's edits are visible to this one (the prompt is fixed for the turn).
+        let ws = crate::workspace::scan(&self.rt.runtime_client).await;
+        let toolbox = self.rt.toolbox_factory.for_agent(
+            agent_def,
+            self.rt.runtime_client.clone(),
+            ws.skills.clone(),
+        );
         let agent_ctx = AgentRuntimeContext {
             provider,
             toolbox,
@@ -181,7 +185,9 @@ impl WorkflowActor {
             parent_ref: ctx.self_ref(),
             session_id,
         };
-        let params = AgentParams::from_def(agent_def);
+        let mut params = AgentParams::from_def(agent_def);
+        params.system_prompt =
+            crate::workspace::compose_system_prompt(agent_def.system_prompt.as_deref(), &ws);
         Ok(ctx.spawn(AgentActor::new(agent_ctx, params)))
     }
 
@@ -227,7 +233,7 @@ impl WorkflowActor {
             }]);
         };
         let session_id = Uuid::new_v4();
-        match self.spawn_agent(ctx, &agent_def, session_id) {
+        match self.spawn_agent(ctx, &agent_def, session_id).await {
             Ok(child) => {
                 let _ = child
                     .tell(AgentCommand::Run {
@@ -303,7 +309,7 @@ impl WorkflowActor {
                 };
                 let to_session = Uuid::new_v4();
                 let input = Self::output_as_input(&output);
-                match self.spawn_agent(ctx, &to_def, to_session) {
+                match self.spawn_agent(ctx, &to_def, to_session).await {
                     Ok(child) => {
                         let _ = child
                             .tell(AgentCommand::Run {
@@ -372,7 +378,7 @@ impl WorkflowActor {
                         let Some(agent_def) = self.agent_def(&agent_name).cloned() else {
                             return CommandEffect::None;
                         };
-                        match self.spawn_agent(ctx, &agent_def, session_id) {
+                        match self.spawn_agent(ctx, &agent_def, session_id).await {
                             Ok(child) => {
                                 self.current_child = Some(child.clone());
                                 child
@@ -417,7 +423,7 @@ impl WorkflowActor {
                         let Some(agent_def) = self.agent_def(&agent_name).cloned() else {
                             return CommandEffect::None;
                         };
-                        match self.spawn_agent(ctx, &agent_def, session_id) {
+                        match self.spawn_agent(ctx, &agent_def, session_id).await {
                             Ok(child) => {
                                 self.current_child = Some(child.clone());
                                 child
@@ -476,7 +482,7 @@ impl WorkflowActor {
                 recoverable: false,
             }]);
         }
-        match self.spawn_agent(ctx, &agent_def, new_session) {
+        match self.spawn_agent(ctx, &agent_def, new_session).await {
             Ok(child) => {
                 let _ = child
                     .tell(AgentCommand::Run {
@@ -656,7 +662,7 @@ impl EventSourcedActor for WorkflowActor {
         let Some(agent_def) = self.agent_def(&agent_name).cloned() else {
             return;
         };
-        if let Ok(child) = self.spawn_agent(ctx, &agent_def, session_id) {
+        if let Ok(child) = self.spawn_agent(ctx, &agent_def, session_id).await {
             self.current_child = Some(child);
         }
     }

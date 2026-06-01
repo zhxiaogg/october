@@ -309,7 +309,12 @@ struct BlockingFactory {
 }
 
 impl ToolboxFactory for BlockingFactory {
-    fn for_agent(&self, def: &WorkflowAgentDef, _client: RuntimeClient) -> Arc<dyn Toolbox> {
+    fn for_agent(
+        &self,
+        def: &WorkflowAgentDef,
+        _client: RuntimeClient,
+        _skills: Arc<workflow::SkillSet>,
+    ) -> Arc<dyn Toolbox> {
         let conclude = conclude_tool_spec(def.output_schema.as_ref(), def.allow_ask_user)
             .expect("worker has an output schema");
         Arc::new(BlockingToolbox {
