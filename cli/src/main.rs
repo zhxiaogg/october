@@ -1,14 +1,18 @@
 use clap::{Parser, Subcommand};
+use cli::client;
 use cli::config::OctoberConfig;
-use cli::run::{ResumeParams, RunParams, resume, run};
+use cli::daemon;
+use cli::error::CliError;
 use cli::validate::validate;
+use models::capabilities::CapabilitySpec;
+use models::daemon::SubmitRequest;
 use models::workflow::WorkflowDefinition;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(
     name = "october",
-    about = "Run agent workflows in a nono-sandboxed runtime"
+    about = "Run agent workflows in a nono-sandboxed runtime, supervised by a local daemon"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -26,7 +30,7 @@ enum Command {
         #[arg(long)]
         config: Option<PathBuf>,
     },
-    /// Run a workflow against a working directory.
+    /// Submit a workflow to the running daemon as a job and stream it.
     Run {
         #[arg(long)]
         workflow: PathBuf,
@@ -38,34 +42,100 @@ enum Command {
         workdir: PathBuf,
         #[arg(long)]
         input: String,
-        #[arg(long)]
-        state_dir: Option<PathBuf>,
         /// Capability file fully replacing the runtime's built-in sandbox default.
         /// Overrides `sandbox.capabilities_file` in the config.
         #[arg(long)]
         capabilities: Option<PathBuf>,
+        /// Submit and return the job id without streaming output.
+        #[arg(long)]
+        detach: bool,
     },
-    /// Resume a suspended run, injecting a reply.
-    Resume {
-        #[arg(long = "run")]
-        run_id: String,
-        /// Config path. Omit to use `$XDG_CONFIG_HOME/october/config.json`
-        /// (else `~/.config/october/config.json`), or an empty config if absent.
-        #[arg(long)]
-        config: Option<PathBuf>,
-        #[arg(long)]
-        message: String,
-        #[arg(long)]
-        state_dir: Option<PathBuf>,
+    /// Manage the background daemon.
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonAction,
+    },
+    /// Manage jobs on the running daemon.
+    Job {
+        #[command(subcommand)]
+        action: JobAction,
     },
 }
 
-/// Locate the sibling `october-runtime` binary next to this executable.
-fn runtime_binary_path() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("october-runtime")))
-        .unwrap_or_else(|| PathBuf::from("october-runtime"))
+#[derive(Subcommand)]
+enum DaemonAction {
+    /// Start the daemon (auto-resumes interrupted jobs). Foreground by default;
+    /// `--background` detaches it with output redirected to `<state>/daemon.log`.
+    Start {
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Run detached in the background instead of the foreground.
+        #[arg(long)]
+        background: bool,
+    },
+    /// Stop the running daemon. In-progress jobs stay Running and auto-resume on
+    /// the next start.
+    Stop {
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Wait for running jobs to finish before the daemon exits.
+        #[arg(long)]
+        drain: bool,
+    },
+    /// Show daemon status: pid, uptime, and job counts by status.
+    Status {
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum JobAction {
+    /// List all jobs known to the daemon.
+    List {
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// Stream a job's live output.
+    Logs {
+        job_id: String,
+        #[arg(long)]
+        follow: bool,
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// Cancel a running job (it becomes resumable).
+    Stop {
+        job_id: String,
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// Resume a suspended or awaiting-input job with a message.
+    Resume {
+        job_id: String,
+        #[arg(short = 'm', long)]
+        message: String,
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// Remove a finished or failed job from the registry.
+    Remove {
+        job_id: String,
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+}
+
+/// Resolve the state dir (where the daemon control socket lives) from config:
+/// `storage.state_dir`, defaulting to `$XDG_STATE_HOME/october`. Every client
+/// command connects to the socket under this dir.
+fn resolve_state_dir(config: Option<&Path>) -> Result<PathBuf, CliError> {
+    Ok(OctoberConfig::resolve(config)?.storage.state_dir)
+}
+
+fn load_workflow(path: &Path) -> Result<WorkflowDefinition, CliError> {
+    let text = std::fs::read_to_string(path).map_err(|e| CliError::Io(e.to_string()))?;
+    serde_json::from_str(&text).map_err(|e| CliError::Config(e.to_string()))
 }
 
 fn do_validate(workflow: PathBuf, config: Option<PathBuf>) -> i32 {
@@ -102,55 +172,183 @@ fn do_validate(workflow: PathBuf, config: Option<PathBuf>) -> i32 {
     }
 }
 
-#[tokio::main]
-async fn main() {
-    let cli = Cli::parse();
-    let code = match cli.command {
-        Command::Validate { workflow, config } => do_validate(workflow, config),
+/// Build a `SubmitRequest` from `run`/submit arguments, validating the workflow
+/// against the config and resolving an explicit `--capabilities` file (the daemon
+/// applies its default when `capabilities` is `None`).
+fn build_submit(
+    workflow: PathBuf,
+    config: Option<PathBuf>,
+    workdir: PathBuf,
+    input: String,
+    capabilities: Option<PathBuf>,
+) -> Result<SubmitRequest, CliError> {
+    let cfg = OctoberConfig::resolve(config.as_deref())?;
+    let def = load_workflow(&workflow)?;
+    let errs = validate(&def, &cfg);
+    if !errs.is_empty() {
+        return Err(CliError::Validation(errs.join("\n")));
+    }
+    let caps: Option<CapabilitySpec> = match capabilities {
+        Some(path) => Some(CapabilitySpec::load(&path).map_err(CliError::Config)?),
+        None => None,
+    };
+    let workflow_name = workflow
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "workflow".to_string());
+    Ok(SubmitRequest {
+        workflow: def,
+        workdir: workdir.to_string_lossy().into_owned(),
+        input,
+        capabilities: caps,
+        workflow_name,
+    })
+}
+
+async fn dispatch(command: Command) -> Result<i32, CliError> {
+    match command {
+        Command::Validate { workflow, config } => Ok(do_validate(workflow, config)),
         Command::Run {
             workflow,
             config,
             workdir,
             input,
-            state_dir,
             capabilities,
-        } => match run(RunParams {
-            workflow_path: workflow,
-            config_path: config,
-            workdir,
-            input,
-            state_dir,
-            runtime_bin: runtime_binary_path(),
-            capabilities_path: capabilities,
-        })
-        .await
-        {
-            Ok(code) => code,
-            Err(e) => {
-                eprintln!("{e}");
-                1
+            detach,
+        } => {
+            let root = resolve_state_dir(config.as_deref())?;
+            let req = build_submit(workflow, config, workdir, input, capabilities)?;
+            if detach {
+                let job_id = client::submit(&root, req).await?;
+                println!("job {job_id}");
+                Ok(0)
+            } else {
+                client::run_attached(&root, req).await
+            }
+        }
+        Command::Daemon { action } => match action {
+            DaemonAction::Start { config, background } => {
+                let cfg = OctoberConfig::resolve(config.as_deref())?;
+                if background {
+                    let state_dir = cfg.storage.state_dir.clone();
+                    spawn_background_daemon(&state_dir, config.as_deref())?;
+                    println!(
+                        "daemon started in background ({}/daemon.log)",
+                        state_dir.display()
+                    );
+                    Ok(0)
+                } else {
+                    daemon::serve(cfg).await?;
+                    Ok(0)
+                }
+            }
+            DaemonAction::Stop { config, drain } => {
+                let root = resolve_state_dir(config.as_deref())?;
+                client::shutdown(&root, drain).await?;
+                println!("daemon stopped");
+                Ok(0)
+            }
+            DaemonAction::Status { config } => {
+                let root = resolve_state_dir(config.as_deref())?;
+                let s = client::status(&root).await?;
+                println!(
+                    "pid {} · up {}s · running {} · suspended {} · finished {} · failed {}",
+                    s.pid, s.uptime_secs, s.running, s.suspended, s.finished, s.failed
+                );
+                Ok(0)
             }
         },
-        Command::Resume {
-            run_id,
-            config,
-            message,
-            state_dir,
-        } => match resume(ResumeParams {
-            run_id,
-            config_path: config,
-            state_dir,
-            message,
-            runtime_bin: runtime_binary_path(),
-        })
-        .await
-        {
-            Ok(code) => code,
-            Err(e) => {
-                eprintln!("{e}");
-                1
+        Command::Job { action } => match action {
+            JobAction::List { config } => {
+                let root = resolve_state_dir(config.as_deref())?;
+                let jobs = client::list(&root).await?;
+                if jobs.is_empty() {
+                    println!("no jobs");
+                } else {
+                    println!("{:<38} {:<18} {:<12} WORKDIR", "JOB", "WORKFLOW", "STATUS");
+                    for j in jobs {
+                        println!(
+                            "{:<38} {:<18} {:<12} {}",
+                            j.job_id,
+                            j.workflow_name,
+                            format!("{:?}", j.status),
+                            j.workdir
+                        );
+                    }
+                }
+                Ok(0)
+            }
+            JobAction::Logs {
+                job_id,
+                follow,
+                config,
+            } => {
+                let root = resolve_state_dir(config.as_deref())?;
+                client::logs(&root, job_id, follow).await?;
+                Ok(0)
+            }
+            JobAction::Stop { job_id, config } => {
+                let root = resolve_state_dir(config.as_deref())?;
+                client::stop(&root, job_id).await?;
+                println!("stopped");
+                Ok(0)
+            }
+            JobAction::Resume {
+                job_id,
+                message,
+                config,
+            } => {
+                let root = resolve_state_dir(config.as_deref())?;
+                client::resume(&root, job_id, message).await?;
+                println!("resumed");
+                Ok(0)
+            }
+            JobAction::Remove { job_id, config } => {
+                let root = resolve_state_dir(config.as_deref())?;
+                client::remove(&root, job_id).await?;
+                println!("removed");
+                Ok(0)
             }
         },
+    }
+}
+
+/// Re-exec this binary as `october daemon start` (foreground) detached from the
+/// terminal, with stdout/stderr redirected to `<state_dir>/daemon.log`, so the
+/// parent returns immediately. The child re-resolves its state/data dirs from
+/// `--config` (or the XDG defaults), deterministically landing on the same
+/// `state_dir` the parent computed for the log path.
+fn spawn_background_daemon(state_dir: &Path, config: Option<&Path>) -> Result<(), CliError> {
+    use std::process::{Command, Stdio};
+    std::fs::create_dir_all(state_dir).map_err(|e| CliError::Io(e.to_string()))?;
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(state_dir.join("daemon.log"))
+        .map_err(|e| CliError::Io(e.to_string()))?;
+    let err_log = log.try_clone().map_err(|e| CliError::Io(e.to_string()))?;
+    let exe = std::env::current_exe().map_err(|e| CliError::Io(e.to_string()))?;
+    let mut cmd = Command::new(exe);
+    cmd.arg("daemon").arg("start");
+    if let Some(c) = config {
+        cmd.arg("--config").arg(c);
+    }
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(err_log));
+    cmd.spawn().map_err(|e| CliError::Executor(e.to_string()))?;
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() {
+    let cli = Cli::parse();
+    let code = match dispatch(cli.command).await {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
     };
     std::process::exit(code);
 }
